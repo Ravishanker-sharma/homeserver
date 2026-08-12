@@ -1,80 +1,43 @@
-# 🚀 Termux StreamDrive & Storage Vault (Python Flask)
+# 🚀 Termux Dual-Server Suite (Python Flask)
 
-A high-performance, visually stunning media server and file manager designed specifically for **Termux on Android** (as well as Linux, macOS, and Windows). 
+A multi-threaded server application designed for **Termux on Android** (as well as Linux, macOS, and Windows). Running a single entrypoint launches **two separate, independent web servers** on different ports:
 
-It allows you to turn your phone or server into a private cloud drive where you can **upload files via drag-and-drop**, **stream HD videos smoothly** (with HTTP Range seeking), **preview music and photos**, and **monitor device storage space left in real-time**.
-
----
-
-## ✨ Key Features
-
-- 🎥 **Smooth Video Streaming**: Native HTTP 206 Partial Content / Byte-Range support allowing fast seeking/scrubbing forward & backward in videos.
-- 💾 **Real-time Storage Telemetry**: Shows total, used, and free disk space left on your device (using standard Python libraries).
-- 📤 **Drag & Drop Uploader**: Fast multi-file uploads with real-time percentage progress bars.
-- 🖼️ **Built-in Media Players**: Video player modal, audio player preview, and photo lightbox viewer.
-- 🔍 **Instant Search & Filtering**: Filter files by categories (Videos, Music, Images, Documents, Archives) or search by filename.
-- 🎨 **Futuristic Cyber-Glassmorphism UI**: Beautiful dark mode interface with ambient glowing background effects and smooth micro-animations.
-- 📱 **Termux Optimized**: Lightweight with ZERO heavy C-compiler binary dependencies. Works natively in Termux!
+1. **Port 8000 (Storage Drive & File Server)**: Open storage dashboard, drag-and-drop uploader, disk metrics gauge, and HTML5 video streaming player.
+2. **Port 6969 (Nexus Gate)**: A **passcode-protected** data relay portal (`password = hiddenrarety`) designed with a discrete UI to process asset URLs.
 
 ---
 
-## 📱 Termux Quick Setup Guide (Android)
+## ✨ Features Breakdown
 
-Follow these simple steps in your Termux app:
+### 🌐 Server 1: Port 8000 (`http://localhost:8000`)
+- **File Management & Uploads**: Drag & drop multi-file uploader with real-time percentage progress bars.
+- **Storage Metrics Gauge**: Live disk space monitoring (`shutil.disk_usage`).
+- **Media Player & Byte-Range Video Streaming**: Stream HD videos and seek smoothly.
 
-### Step 1: Update Termux and Install Python
+### 🔐 Server 2: Port 6969 (`http://localhost:6969`)
+- **Passcode Protection**: Guarded by passcode `hiddenrarety`.
+- **Discrete Nexus Gate**: Neutral tech UI with zero references to brand names or downloading terms.
+- **Asset URL Processor**: Resolves resource links into direct streamable/downloadable payload URLs.
+
+---
+
+## 📱 Termux Quick Setup Guide
+
 ```bash
+# 1. Update Termux and install Python
 pkg update && pkg upgrade -y
 pkg install python -y
-```
 
-### Step 2: Grant Storage Access (Optional but Recommended)
-To allow Termux to access phone storage:
-```bash
+# 2. Grant storage access (optional but recommended)
 termux-setup-storage
-```
 
-### Step 3: Clone / Copy Project & Install Dependencies
-Navigate to your project directory and run:
-```bash
+# 3. Install requirements
 pip install -r requirements.txt
-```
 
-### Step 4: Start the Server
-```bash
+# 4. Start both servers concurrently
 python app.py
 ```
 
----
-
-## 🌐 How to Access Your Server
-
-Once started, the server outputs your local link:
-
-1. **On the same phone (Termux device)**:
-   Open Chrome / Firefox on your phone and go to:
-   `http://localhost:5000`
-
-2. **From other devices on the same Wi-Fi network (PC, Smart TV, Tablet)**:
-   - Find your phone's IP address in Termux by running `ifconfig` or `ip addr show`.
-   - Open browser on your PC/Tablet and go to:
-     `http://<YOUR_PHONE_IP>:5000`
-     *(Example: `http://192.168.1.15:5000`)*
-
----
-
-## 📁 Project Structure
-
-```
-homeserver/
-├── app.py              # Flask server backend (Byte-range video streaming + APIs)
-├── requirements.txt    # Minimal dependencies (Flask & Werkzeug)
-├── static/
-│   ├── css/
-│   │   └── style.css   # Dark glassmorphism design system & animations
-│   └── js/
-│       └── app.js      # Interactive uploader, file manager, & player modals
-├── templates/
-│   └── index.html      # Responsive HTML5 dashboard interface
-└── uploads/            # Default storage folder for uploaded files
-```
+### Access Ports:
+- **Server 1 (Storage Drive)**: `http://localhost:8000` (or `http://<PHONE_IP>:8000`)
+- **Server 2 (Nexus Gate)**: `http://localhost:6969` (Passcode: `hiddenrarety`)
