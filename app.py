@@ -37,11 +37,10 @@ MEDIA_MIME_TYPES = {
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
-RELAY_FOLDER = os.path.join(BASE_DIR, 'relay_downloads')
 TRASH_FOLDER = os.path.join(BASE_DIR, 'trash')
 CHUNKS_FOLDER = os.path.join(BASE_DIR, 'chunks')
 
-for folder in [UPLOAD_FOLDER, RELAY_FOLDER, TRASH_FOLDER, CHUNKS_FOLDER]:
+for folder in [UPLOAD_FOLDER, TRASH_FOLDER, CHUNKS_FOLDER]:
     os.makedirs(folder, exist_ok=True)
 
 # State cache variables
@@ -52,7 +51,6 @@ AUTH_COOKIE_NAME = "nexus_gate_auth"
 
 # Tracking state
 conversion_tasks = {}
-relay_tasks = {}
 
 def format_bytes(size: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -84,64 +82,6 @@ def run_background_conversion(task_id, filepath, out_filepath):
     except Exception as e:
         conversion_tasks[task_id] = {'status': 'error', 'error': str(e)}
 
-def run_relay_download(task_id, target_url, filename):
-    relay_tasks[task_id] = {'status': 'downloading', 'progress': 0, 'filename': filename}
-    try:
-        resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, stream=True, timeout=15)
-        if resp.status_code != 200:
-            relay_tasks[task_id] = {'status': 'error', 'error': f'Link expired or invalid (HTTP {resp.status_code}). Please generate a new fastdl link.'}
-            return
-            
-        mime = resp.headers.get('Content-Type', '').lower()
-        
-        if 'mpegurl' in mime or 'm3u8' in target_url.lower():
-            # It's an HLS stream (like Terabox fastdl). Download all chunks and merge.
-            playlist = resp.text
-            segments = [line.strip() for line in playlist.split('\n') if line.strip() and not line.startswith('#')]
-            
-            domain = "/".join(resp.url.split('/')[:3])
-            
-            # Change extension to .ts because we are concatenating raw mpegts chunks
-            filename = filename.rsplit('.', 1)[0] + '.ts'
-            filepath = os.path.join(RELAY_FOLDER, filename)
-            
-            total_segments = len(segments)
-            if total_segments == 0:
-                relay_tasks[task_id] = {'status': 'error', 'error': 'Invalid HLS playlist: no segments found'}
-                return
-                
-            downloaded = 0
-            
-            with open(filepath, 'wb') as f:
-                for seg in segments:
-                    # Use urljoin to correctly resolve both absolute and relative segment paths
-                    seg_url = urllib.parse.urljoin(target_url, seg)
-                    r = requests.get(seg_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
-                    if r.status_code == 200:
-                        f.write(r.content)
-                    else:
-                        relay_tasks[task_id] = {'status': 'error', 'error': f'Failed to download chunk (HTTP {r.status_code}). Link likely expired.'}
-                        os.remove(filepath)
-                        return
-                    downloaded += 1
-                    relay_tasks[task_id]['progress'] = int((downloaded / total_segments) * 100)
-                    
-            relay_tasks[task_id] = {'status': 'completed', 'filename': filename}
-        else:
-            # Standard direct download
-            filepath = os.path.join(RELAY_FOLDER, filename)
-            total_size = int(resp.headers.get('content-length', 0))
-            downloaded = 0
-            with open(filepath, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=1024*1024):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            relay_tasks[task_id]['progress'] = int((downloaded / total_size) * 100)
-            relay_tasks[task_id] = {'status': 'completed', 'filename': filename}
-    except Exception as e:
-        relay_tasks[task_id] = {'status': 'error', 'error': str(e)}
 
 def get_media_mimetype(filepath: str) -> str:
     ext = filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
@@ -517,100 +457,6 @@ if USE_FASTAPI:
         return Response(content=m3u_content, headers=headers)
 
 
-    # Relay Server 2
-    app_relay = FastAPI(title="Nexus Gate Relay", version="2.0.0")
-    templates_relay = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
-    app_relay.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
-
-    @app_relay.get("/", response_class=HTMLResponse)
-    async def relay_index(request: Request):
-        auth_cookie = request.cookies.get(AUTH_COOKIE_NAME)
-        is_authenticated = (auth_cookie == AUTH_TOKEN_VALUE)
-        return templates_relay.TemplateResponse("relay.html", {"request": request, "authenticated": is_authenticated})
-
-    @app_relay.post("/api/auth")
-    async def relay_auth(request: Request):
-        data = await request.json() or {}
-        if data.get('passcode') == GATE_PASSCODE:
-            response = JSONResponse(content={'success': True, 'message': 'Access Granted'})
-            response.set_cookie(key=AUTH_COOKIE_NAME, value=AUTH_TOKEN_VALUE, httponly=True, max_age=86400 * 7)
-            return response
-        return JSONResponse(content={'success': False, 'error': 'Invalid Passcode'}, status_code=401)
-
-    @app_relay.post("/api/logout")
-    async def relay_logout():
-        response = JSONResponse(content={'success': True})
-        response.delete_cookie(key=AUTH_COOKIE_NAME)
-        return response
-
-    @app_relay.post("/api/resolve")
-    async def relay_resolve(request: Request):
-        if request.cookies.get(AUTH_COOKIE_NAME) != AUTH_TOKEN_VALUE:
-            return JSONResponse(content={'success': False, 'error': 'Unauthorized'}, status_code=401)
-        data = await request.json() or {}
-        target_url = data.get('url', '').strip()
-        if not target_url:
-            return JSONResponse(content={'success': False, 'error': 'URL required'}, status_code=400)
-            
-        import base64
-        filename = data.get('filename') or target_url.split('/')[-1].split('?')[0] or f"asset_{int(time.time())}"
-        
-        if 'fastdl.teradownloader.com' in target_url:
-            qs = urllib.parse.parse_qs(urllib.parse.urlparse(target_url).query)
-            if 'data' in qs:
-                try:
-                    target_url = urllib.parse.unquote(urllib.parse.unquote(base64.b64decode(qs['data'][0]).decode('utf-8')))
-                except:
-                    pass
-            if 'filename' in qs:
-                filename = qs['filename'][0]
-        elif any(d in target_url for d in ['terabox.com', 'teraboxapp.com', '1024tera.com', 'terafileshare.com', 'mirrobox.com', 'freeterabox.com']):
-            return JSONResponse(content={'success': False, 'error': 'Terabox direct links blocked. Paste a fastdl.teradownloader link instead.'}, status_code=400)
-            
-        filename = secure_filename(urllib.parse.unquote(filename))
-        task_id = f"relay_{int(time.time())}_{filename}"
-        threading.Thread(target=run_relay_download, args=(task_id, target_url, filename), daemon=True).start()
-        
-        return {'success': True, 'task_id': task_id, 'filename': filename, 'status': 'downloading'}
-
-    @app_relay.get("/api/relay/status/{task_id}")
-    async def relay_status(task_id: str, request: Request):
-        if request.cookies.get(AUTH_COOKIE_NAME) != AUTH_TOKEN_VALUE:
-            return JSONResponse(content={'success': False, 'error': 'Unauthorized'}, status_code=401)
-        task = relay_tasks.get(task_id)
-        if not task: return JSONResponse(content={'success': False, 'error': 'Not found'}, status_code=404)
-        return {'success': True, 'status': task['status'], 'progress': task.get('progress', 0), 'filename': task.get('filename'), 'error': task.get('error')}
-
-    @app_relay.get("/api/relay/files")
-    async def relay_files(request: Request):
-        if request.cookies.get(AUTH_COOKIE_NAME) != AUTH_TOKEN_VALUE:
-            return JSONResponse(content={'success': False, 'error': 'Unauthorized'}, status_code=401)
-        files = []
-        for f in os.listdir(RELAY_FOLDER):
-            if not f.startswith('.'):
-                path = os.path.join(RELAY_FOLDER, f)
-                files.append({'name': f, 'size': format_bytes(os.path.getsize(path)), 'url': f"/relay/stream/{urllib.parse.quote(f)}", 'category': get_file_category('', f)})
-        return {'success': True, 'files': files}
-
-    @app_relay.delete("/api/relay/files/{filename}")
-    async def relay_delete(filename: str, request: Request):
-        if request.cookies.get(AUTH_COOKIE_NAME) != AUTH_TOKEN_VALUE:
-            return JSONResponse(content={'success': False, 'error': 'Unauthorized'}, status_code=401)
-        safe_name = secure_filename(urllib.parse.unquote(filename))
-        path = os.path.join(RELAY_FOLDER, safe_name)
-        if os.path.exists(path):
-            os.remove(path)
-            return {'success': True}
-        return JSONResponse(content={'success': False, 'error': 'Not found'}, status_code=404)
-
-    @app_relay.get("/relay/stream/{filename}")
-    async def relay_stream(filename: str, request: Request):
-        safe_name = secure_filename(urllib.parse.unquote(filename))
-        path = os.path.join(RELAY_FOLDER, safe_name)
-        if not os.path.exists(path):
-            return JSONResponse(content={'success': False, 'error': 'Not found'}, status_code=404)
-        return FileResponse(path)
-
 
 # ==============================================================================
 # FLASK FALLBACK MODE (FOR TERMUX WITHOUT RUST COMPILER)
@@ -794,84 +640,6 @@ else:
         return response
 
 
-    app_relay_flask = Flask(__name__, template_folder='templates', static_folder='static')
-    app_relay_flask.secret_key = 'nexus-secret-6969'
-
-    @app_relay_flask.route('/')
-    def flask_relay_index():
-        return render_template('relay.html', authenticated=session.get('auth', False))
-
-    @app_relay_flask.route('/api/auth', methods=['POST'])
-    def flask_relay_auth():
-        if request.json.get('passcode') == GATE_PASSCODE:
-            session['auth'] = True
-            return jsonify({'success': True, 'message': 'Access Granted'})
-        return jsonify({'success': False, 'error': 'Invalid Passcode'}), 401
-
-    @app_relay_flask.route('/api/logout', methods=['POST'])
-    def flask_relay_logout():
-        session.pop('auth', None)
-        return jsonify({'success': True})
-
-    @app_relay_flask.route('/api/resolve', methods=['POST'])
-    def flask_relay_resolve():
-        if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
-        target_url = request.json.get('url', '').strip()
-        if not target_url: return jsonify({'success': False, 'error': 'URL required'}), 400
-        
-        import base64
-        filename = request.json.get('filename') or target_url.split('/')[-1].split('?')[0] or f"asset_{int(time.time())}"
-        
-        if 'fastdl.teradownloader.com' in target_url:
-            qs = urllib.parse.parse_qs(urllib.parse.urlparse(target_url).query)
-            if 'data' in qs:
-                try:
-                    target_url = urllib.parse.unquote(urllib.parse.unquote(base64.b64decode(qs['data'][0]).decode('utf-8')))
-                except:
-                    pass
-            if 'filename' in qs:
-                filename = qs['filename'][0]
-        elif any(d in target_url for d in ['terabox.com', 'teraboxapp.com', '1024tera.com', 'terafileshare.com', 'mirrobox.com', 'freeterabox.com']):
-            return jsonify({'success': False, 'error': 'Terabox direct links blocked. Paste a fastdl.teradownloader link instead.'}), 400
-            
-        filename = secure_filename(urllib.parse.unquote(filename))
-        task_id = f"relay_{int(time.time())}_{filename}"
-        threading.Thread(target=run_relay_download, args=(task_id, target_url, filename), daemon=True).start()
-        
-        return jsonify({'success': True, 'task_id': task_id, 'filename': filename, 'status': 'downloading'})
-
-    @app_relay_flask.route('/api/relay/status/<task_id>')
-    def flask_relay_status(task_id):
-        if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
-        task = relay_tasks.get(task_id)
-        if not task: return jsonify({'success': False, 'error': 'Not found'}), 404
-        return jsonify({'success': True, 'status': task['status'], 'progress': task.get('progress', 0), 'filename': task.get('filename')})
-
-    @app_relay_flask.route('/api/relay/files')
-    def flask_relay_files():
-        if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
-        files = []
-        for f in os.listdir(RELAY_FOLDER):
-            if not f.startswith('.'):
-                path = os.path.join(RELAY_FOLDER, f)
-                files.append({'name': f, 'size': format_bytes(os.path.getsize(path)), 'url': f"/relay/stream/{urllib.parse.quote(f)}", 'category': get_file_category('', f)})
-        return jsonify({'success': True, 'files': files})
-
-    @app_relay_flask.route('/api/relay/files/<filename>', methods=['DELETE'])
-    def flask_relay_delete(filename):
-        if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
-        safe_name = secure_filename(urllib.parse.unquote(filename))
-        path = os.path.join(RELAY_FOLDER, safe_name)
-        if os.path.exists(path):
-            os.remove(path)
-            return jsonify({'success': True})
-        return jsonify({'success': False, 'error': 'Not found'}), 404
-
-    @app_relay_flask.route('/relay/stream/<path:filename>')
-    def flask_relay_stream(filename):
-        safe_name = secure_filename(urllib.parse.unquote(filename))
-        return send_from_directory(RELAY_FOLDER, safe_name, conditional=True)
-
 
 # ==============================================================================
 # DUAL SERVER LAUNCHER
@@ -884,14 +652,6 @@ def run_main():
         print("🚀 Port 8000: Storage Drive active on http://0.0.0.0:8000 (Flask Lightweight WSGI)")
         run_simple('0.0.0.0', 8000, app_main_flask, threaded=True)
 
-def run_relay():
-    if USE_FASTAPI:
-        print("🔐 Port 6969: Nexus Gate active on http://0.0.0.0:6969 (FastAPI Async ASGI)")
-        uvicorn.run(app_relay, host="0.0.0.0", port=6969, log_level="warning")
-    else:
-        print("🔐 Port 6969: Nexus Gate active on http://0.0.0.0:6969 (Flask Lightweight WSGI)")
-        run_simple('0.0.0.0', 6969, app_relay_flask, threaded=True)
-
 if __name__ == "__main__":
     if not USE_FASTAPI:
         print("⚡ [Termux Notice] Running in Lightweight Flask Mode (Zero Rust compilation required).")
@@ -899,15 +659,10 @@ if __name__ == "__main__":
         print("⚡ [High-Performance Mode] Running in FastAPI + Uvicorn Async Mode.")
 
     p1 = multiprocessing.Process(target=run_main)
-    p2 = multiprocessing.Process(target=run_relay)
-
     p1.start()
-    p2.start()
 
     print("==================================================================")
-    print("  🌐 SERVER 1: http://localhost:8000 (Storage Drive)")
-    print("  🔐 SERVER 2: http://localhost:6969 (Nexus Gate | Passcode: hiddenrarety)")
+    print("  🌐 SERVER: http://localhost:8000 (Storage Drive)")
     print("==================================================================")
 
     p1.join()
-    p2.join()
