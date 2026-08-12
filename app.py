@@ -35,14 +35,24 @@ MEDIA_MIME_TYPES = {
     'opus': 'audio/opus'
 }
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+RELAY_FOLDER = os.path.join(BASE_DIR, 'relay_downloads')
+TRASH_FOLDER = os.path.join(BASE_DIR, 'trash')
+CHUNKS_FOLDER = os.path.join(BASE_DIR, 'chunks')
+
+for folder in [UPLOAD_FOLDER, RELAY_FOLDER, TRASH_FOLDER, CHUNKS_FOLDER]:
+    os.makedirs(folder, exist_ok=True)
+
 # State cache variables
 STORAGE_CACHE = {'timestamp': 0, 'data': None}
 CACHE_DIR_SIZE = {'timestamp': 0, 'data': None}
 AUTH_TOKEN_VALUE = "hiddenrarety"
 AUTH_COOKIE_NAME = "nexus_gate_auth"
 
-# Conversion tracking
+# Tracking state
 conversion_tasks = {}
+relay_tasks = {}
 
 def format_bytes(size: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -73,6 +83,24 @@ def run_background_conversion(task_id, filepath, out_filepath):
             conversion_tasks[task_id] = {'status': 'error', 'error': proc.stderr}
     except Exception as e:
         conversion_tasks[task_id] = {'status': 'error', 'error': str(e)}
+
+def run_relay_download(task_id, target_url, filename):
+    relay_tasks[task_id] = {'status': 'downloading', 'progress': 0, 'filename': filename}
+    filepath = os.path.join(RELAY_FOLDER, filename)
+    try:
+        resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, stream=True, timeout=15)
+        total_size = int(resp.headers.get('content-length', 0))
+        downloaded = 0
+        with open(filepath, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=1024*1024):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        relay_tasks[task_id]['progress'] = int((downloaded / total_size) * 100)
+        relay_tasks[task_id] = {'status': 'completed', 'filename': filename}
+    except Exception as e:
+        relay_tasks[task_id] = {'status': 'error', 'error': str(e)}
 
 def get_media_mimetype(filepath: str) -> str:
     ext = filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
@@ -483,23 +511,64 @@ if USE_FASTAPI:
         if not target_url:
             return JSONResponse(content={'success': False, 'error': 'URL required'}, status_code=400)
             
-        terabox_domains = ['terabox.com', 'teraboxapp.com', '1024tera.com', 'terafileshare.com', 'mirrobox.com', 'freeterabox.com']
-        if any(d in target_url for d in terabox_domains):
-            return JSONResponse(content={'success': False, 'error': 'Terabox requires premium login. Free scraper APIs are dead. Please provide a generic Direct Link instead.'}, status_code=400)
+        import base64
+        filename = data.get('filename') or target_url.split('/')[-1].split('?')[0] or f"asset_{int(time.time())}"
+        
+        if 'fastdl.teradownloader.com' in target_url:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(target_url).query)
+            if 'data' in qs:
+                try:
+                    target_url = urllib.parse.unquote(urllib.parse.unquote(base64.b64decode(qs['data'][0]).decode('utf-8')))
+                except:
+                    pass
+            if 'filename' in qs:
+                filename = qs['filename'][0]
+        elif any(d in target_url for d in ['terabox.com', 'teraboxapp.com', '1024tera.com', 'terafileshare.com', 'mirrobox.com', 'freeterabox.com']):
+            return JSONResponse(content={'success': False, 'error': 'Terabox direct links blocked. Paste a fastdl.teradownloader link instead.'}, status_code=400)
             
-        try:
-            ext = target_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in target_url else ''
-            if ext in ['mp4', 'mkv', 'webm', 'avi', 'mov', 'mp3', 'wav', 'png', 'jpg', 'jpeg', 'zip', 'pdf']:
-                filename = target_url.split('/')[-1].split('?')[0] or 'media_asset'
-                return {'success': True, 'download_url': target_url, 'filename': filename, 'formatted_size': 'Direct Link', 'category': get_file_category('', filename)}
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = requests.get(target_url, headers=headers, timeout=12, allow_redirects=True)
-            final_url = resp.url
-            filename = final_url.split('/')[-1].split('?')[0] or 'extracted_payload'
-            mime = resp.headers.get('Content-Type', '')
-            return {'success': True, 'download_url': final_url, 'filename': filename, 'formatted_size': format_bytes(int(resp.headers.get('Content-Length', 0))), 'category': get_file_category(mime, filename)}
-        except Exception as e:
-            return JSONResponse(content={'success': False, 'error': str(e)}, status_code=500)
+        filename = secure_filename(urllib.parse.unquote(filename))
+        task_id = f"relay_{int(time.time())}_{filename}"
+        threading.Thread(target=run_relay_download, args=(task_id, target_url, filename), daemon=True).start()
+        
+        return {'success': True, 'task_id': task_id, 'filename': filename, 'status': 'downloading'}
+
+    @app_relay.get("/api/relay/status/{task_id}")
+    async def relay_status(task_id: str, request: Request):
+        if request.cookies.get(AUTH_COOKIE_NAME) != AUTH_TOKEN_VALUE:
+            return JSONResponse(content={'success': False, 'error': 'Unauthorized'}, status_code=401)
+        task = relay_tasks.get(task_id)
+        if not task: return JSONResponse(content={'success': False, 'error': 'Not found'}, status_code=404)
+        return {'success': True, 'status': task['status'], 'progress': task.get('progress', 0), 'filename': task.get('filename')}
+
+    @app_relay.get("/api/relay/files")
+    async def relay_files(request: Request):
+        if request.cookies.get(AUTH_COOKIE_NAME) != AUTH_TOKEN_VALUE:
+            return JSONResponse(content={'success': False, 'error': 'Unauthorized'}, status_code=401)
+        files = []
+        for f in os.listdir(RELAY_FOLDER):
+            if not f.startswith('.'):
+                path = os.path.join(RELAY_FOLDER, f)
+                files.append({'name': f, 'size': format_bytes(os.path.getsize(path)), 'url': f"/relay/stream/{urllib.parse.quote(f)}", 'category': get_file_category('', f)})
+        return {'success': True, 'files': files}
+
+    @app_relay.delete("/api/relay/files/{filename}")
+    async def relay_delete(filename: str, request: Request):
+        if request.cookies.get(AUTH_COOKIE_NAME) != AUTH_TOKEN_VALUE:
+            return JSONResponse(content={'success': False, 'error': 'Unauthorized'}, status_code=401)
+        safe_name = secure_filename(urllib.parse.unquote(filename))
+        path = os.path.join(RELAY_FOLDER, safe_name)
+        if os.path.exists(path):
+            os.remove(path)
+            return {'success': True}
+        return JSONResponse(content={'success': False, 'error': 'Not found'}, status_code=404)
+
+    @app_relay.get("/relay/stream/{filename}")
+    async def relay_stream(filename: str, request: Request):
+        safe_name = secure_filename(urllib.parse.unquote(filename))
+        path = os.path.join(RELAY_FOLDER, safe_name)
+        if not os.path.exists(path):
+            return JSONResponse(content={'success': False, 'error': 'Not found'}, status_code=404)
+        return FileResponse(path)
 
 
 # ==============================================================================
@@ -707,14 +776,60 @@ else:
     def flask_relay_resolve():
         if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         target_url = request.json.get('url', '').strip()
+        if not target_url: return jsonify({'success': False, 'error': 'URL required'}), 400
         
-        terabox_domains = ['terabox.com', 'teraboxapp.com', '1024tera.com', 'terafileshare.com', 'mirrobox.com', 'freeterabox.com']
-        if any(d in target_url for d in terabox_domains):
-            return jsonify({'success': False, 'error': 'Terabox requires premium login. Free scraper APIs are dead. Please provide a generic Direct Link instead.'}), 400
+        import base64
+        filename = request.json.get('filename') or target_url.split('/')[-1].split('?')[0] or f"asset_{int(time.time())}"
+        
+        if 'fastdl.teradownloader.com' in target_url:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(target_url).query)
+            if 'data' in qs:
+                try:
+                    target_url = urllib.parse.unquote(urllib.parse.unquote(base64.b64decode(qs['data'][0]).decode('utf-8')))
+                except:
+                    pass
+            if 'filename' in qs:
+                filename = qs['filename'][0]
+        elif any(d in target_url for d in ['terabox.com', 'teraboxapp.com', '1024tera.com', 'terafileshare.com', 'mirrobox.com', 'freeterabox.com']):
+            return jsonify({'success': False, 'error': 'Terabox direct links blocked. Paste a fastdl.teradownloader link instead.'}), 400
             
-        resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=12)
-        filename = resp.url.split('/')[-1].split('?')[0] or 'asset'
-        return jsonify({'success': True, 'download_url': resp.url, 'filename': filename, 'formatted_size': 'Direct Link', 'category': get_file_category(resp.headers.get('Content-Type', ''), filename)})
+        filename = secure_filename(urllib.parse.unquote(filename))
+        task_id = f"relay_{int(time.time())}_{filename}"
+        threading.Thread(target=run_relay_download, args=(task_id, target_url, filename), daemon=True).start()
+        
+        return jsonify({'success': True, 'task_id': task_id, 'filename': filename, 'status': 'downloading'})
+
+    @app_relay_flask.route('/api/relay/status/<task_id>')
+    def flask_relay_status(task_id):
+        if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+        task = relay_tasks.get(task_id)
+        if not task: return jsonify({'success': False, 'error': 'Not found'}), 404
+        return jsonify({'success': True, 'status': task['status'], 'progress': task.get('progress', 0), 'filename': task.get('filename')})
+
+    @app_relay_flask.route('/api/relay/files')
+    def flask_relay_files():
+        if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+        files = []
+        for f in os.listdir(RELAY_FOLDER):
+            if not f.startswith('.'):
+                path = os.path.join(RELAY_FOLDER, f)
+                files.append({'name': f, 'size': format_bytes(os.path.getsize(path)), 'url': f"/relay/stream/{urllib.parse.quote(f)}", 'category': get_file_category('', f)})
+        return jsonify({'success': True, 'files': files})
+
+    @app_relay_flask.route('/api/relay/files/<filename>', methods=['DELETE'])
+    def flask_relay_delete(filename):
+        if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+        safe_name = secure_filename(urllib.parse.unquote(filename))
+        path = os.path.join(RELAY_FOLDER, safe_name)
+        if os.path.exists(path):
+            os.remove(path)
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'Not found'}), 404
+
+    @app_relay_flask.route('/relay/stream/<path:filename>')
+    def flask_relay_stream(filename):
+        safe_name = secure_filename(urllib.parse.unquote(filename))
+        return send_from_directory(RELAY_FOLDER, safe_name, conditional=True)
 
 
 # ==============================================================================

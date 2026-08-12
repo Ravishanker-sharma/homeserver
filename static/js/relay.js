@@ -90,16 +90,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const data = await response.json();
                 if (data.success) {
-                    renderResult(data);
-                    showToast('Asset resolved successfully!', 'success');
+                    if (data.status === 'downloading') {
+                        showToast('Downloading isolated asset to Vault...', 'success');
+                        btnText.textContent = 'Downloading...';
+                        btnSpinner.style.display = 'inline-block';
+                        
+                        const pollTask = setInterval(async () => {
+                            const statusRes = await fetch(`/api/relay/status/${data.task_id}`);
+                            const statusData = await statusRes.json();
+                            
+                            if (statusData.status === 'completed') {
+                                clearInterval(pollTask);
+                                showToast('Download complete! Asset added to Vault.', 'success');
+                                setLoading(false);
+                                btnText.textContent = 'Process Link';
+                                fetchVaultFiles();
+                            } else if (statusData.status === 'error') {
+                                clearInterval(pollTask);
+                                showToast('Download failed: ' + statusData.error, 'error');
+                                setLoading(false);
+                                btnText.textContent = 'Process Link';
+                            } else {
+                                btnText.textContent = `Downloading... ${statusData.progress || 0}%`;
+                            }
+                        }, 2000);
+                        return; // Don't reset loading state yet
+                    } else {
+                        renderResult(data);
+                        showToast('Asset resolved successfully!', 'success');
+                    }
                 } else {
                     showToast(data.error || 'Failed to resolve link', 'error');
                 }
             } catch (err) {
                 showToast('Error connecting to relay node', 'error');
-            } finally {
-                setLoading(false);
             }
+            if (btnText.textContent !== 'Downloading...') setLoading(false);
         });
     }
 
@@ -153,15 +179,101 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function setLoading(isLoading) {
-        if (isLoading) {
-            btnFetch.disabled = true;
-            btnText.style.display = 'none';
-            btnSpinner.style.display = 'inline-block';
-        } else {
-            btnFetch.disabled = false;
-            btnText.style.display = 'inline';
-            btnSpinner.style.display = 'none';
+        btnSpinner.style.display = isLoading ? 'inline-block' : 'none';
+        btnText.textContent = isLoading ? 'Processing...' : 'Process Link';
+        btnFetch.disabled = isLoading;
+        targetUrlInput.disabled = isLoading;
+    }
+
+    // ==========================================
+    // VAULT MANAGEMENT
+    // ==========================================
+    
+    async function fetchVaultFiles() {
+        try {
+            const res = await fetch('/api/relay/files');
+            const data = await res.json();
+            if (data.success) {
+                renderVaultFiles(data.files);
+            }
+        } catch (e) {
+            console.error('Failed to fetch vault', e);
         }
+    }
+    
+    function renderVaultFiles(files) {
+        const grid = document.getElementById('vault-grid');
+        const emptyState = document.getElementById('vault-empty-state');
+        if (!grid || !emptyState) return;
+        
+        grid.innerHTML = '';
+        if (files.length === 0) {
+            grid.style.display = 'none';
+            emptyState.style.display = 'block';
+            return;
+        }
+        
+        grid.style.display = 'grid';
+        emptyState.style.display = 'none';
+        
+        files.forEach(file => {
+            const card = document.createElement('div');
+            card.className = 'file-card';
+            
+            let icon = '📄';
+            if (file.category === 'video') icon = '🎬';
+            if (file.category === 'audio') icon = '🎵';
+            if (file.category === 'image') icon = '🖼️';
+            
+            card.innerHTML = `
+                <div class="file-icon">${icon}</div>
+                <div class="file-info">
+                    <h4 class="file-name" title="${file.name}">${file.name}</h4>
+                    <p class="file-meta">${file.size}</p>
+                </div>
+                <div class="file-actions" style="margin-top: 10px; display: flex; gap: 5px;">
+                    <button class="btn-primary btn-sm play-btn" style="flex:1;">Play</button>
+                    <button class="btn-secondary btn-sm delete-btn" style="flex:1; background: #fee2e2; color: #dc2626; border-color: #fca5a5;">Delete</button>
+                </div>
+            `;
+            
+            const playBtn = card.querySelector('.play-btn');
+            playBtn.onclick = () => {
+                renderResult({
+                    success: true,
+                    download_url: file.url,
+                    filename: file.name,
+                    formatted_size: file.size,
+                    category: file.category
+                });
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+            
+            const delBtn = card.querySelector('.delete-btn');
+            delBtn.onclick = async () => {
+                if (confirm('Delete this isolated asset forever?')) {
+                    const res = await fetch(`/api/relay/files/${encodeURIComponent(file.name)}`, { method: 'DELETE' });
+                    const d = await res.json();
+                    if (d.success) {
+                        showToast('Asset deleted', 'success');
+                        fetchVaultFiles();
+                        if (currentPayloadUrl === file.url) {
+                            resetPreview();
+                            resultContainer.style.display = 'none';
+                        }
+                    } else {
+                        showToast('Failed to delete asset', 'error');
+                    }
+                }
+            };
+            
+            grid.appendChild(card);
+        });
+    }
+    
+    // Fetch initial vault files if authenticated
+    if (portalContent && portalContent.style.display !== 'none') {
+        fetchVaultFiles();
     }
 
     function showToast(message, type = 'success') {

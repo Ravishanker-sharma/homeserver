@@ -1287,4 +1287,28 @@ body {
     video {
         border-radius: 8px;
     }
+
+    /* Modal Player Toolbar Fixes */
+    .modal-player-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+
+    .modal-player-toolbar .speed-selector {
+        justify-content: center;
+        flex-wrap: wrap;
+        width: 100%;
+    }
+
+    .modal-player-toolbar > div[style*="flex-wrap: wrap"] {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        justify-content: stretch !important;
+    }
+    
+    .modal-player-toolbar button {
+        width: 100%;
+        justify-content: center;
+    }
 }
