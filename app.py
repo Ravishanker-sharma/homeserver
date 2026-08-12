@@ -41,6 +41,9 @@ def format_bytes(size: int) -> str:
     s = round(size / p, 2)
     return f"{s} {size_name[i]}"
 
+def check_ffmpeg_installed() -> bool:
+    return shutil.which('ffmpeg') is not None
+
 def get_media_mimetype(filepath: str) -> str:
     ext = filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
     if ext in MEDIA_MIME_TYPES:
@@ -258,6 +261,7 @@ if USE_FASTAPI:
 
     @app_main.get("/files/{filename}")
     async def serve_file(filename: str, request: Request):
+        """High-performance async Byte-Range media streaming with Safari bytes=0-1 probe support."""
         safe_name = secure_filename(filename)
         filepath = os.path.join(UPLOAD_FOLDER, safe_name)
         if not os.path.isfile(filepath):
@@ -275,6 +279,10 @@ if USE_FASTAPI:
                 byte1 = int(g[0])
                 if g[1]:
                     byte2 = int(g[1])
+            
+            # Handle Safari probe (bytes=0-1)
+            if byte1 == 0 and byte2 == 1:
+                byte2 = 1 
 
             chunk_size = 1024 * 1024 * 2
             if byte2 is None:
@@ -302,6 +310,45 @@ if USE_FASTAPI:
             return StreamingResponse(iterfile(), status_code=206, media_type=mimetype, headers=headers)
 
         return FileResponse(filepath, media_type=mimetype, headers={'Accept-Ranges': 'bytes'})
+
+    @app_main.get("/transcode/{filename}")
+    async def transcode_file(filename: str):
+        """On-the-fly FFmpeg AAC audio transcoder for Safari, Chrome & Brave compatibility."""
+        safe_name = secure_filename(filename)
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        if not os.path.isfile(filepath):
+            raise HTTPException(status_code=404, detail="File not found")
+
+        if not check_ffmpeg_installed():
+            raise HTTPException(status_code=500, detail="FFmpeg is not installed on server. Run 'pkg install ffmpeg' in Termux.")
+
+        cmd = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error',
+            '-i', filepath,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-movflags', 'frag_keyframe+empty_moov',
+            '-f', 'mp4',
+            'pipe:1'
+        ]
+
+        import subprocess
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        def iter_transcode():
+            try:
+                while True:
+                    data = proc.stdout.read(64 * 1024)
+                    if not data:
+                        break
+                    yield data
+            finally:
+                proc.terminate()
+
+        headers = {'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache'}
+        return StreamingResponse(iter_transcode(), media_type="video/mp4", headers=headers)
+
 
     @app_main.get("/download/{filename}")
     async def download_file(filename: str):
@@ -446,6 +493,43 @@ else:
     def flask_serve_file(filename):
         safe_name = secure_filename(filename)
         return send_from_directory(UPLOAD_FOLDER, safe_name, conditional=True, mimetype=get_media_mimetype(os.path.join(UPLOAD_FOLDER, safe_name)))
+
+    @app_main_flask.route('/transcode/<path:filename>')
+    def flask_transcode_file(filename):
+        safe_name = secure_filename(filename)
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        if not os.path.isfile(filepath):
+            abort(404)
+
+        if not check_ffmpeg_installed():
+            return jsonify({'success': False, 'error': "FFmpeg is not installed on server. Run 'pkg install ffmpeg' in Termux."}), 500
+
+        cmd = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error',
+            '-i', filepath,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-movflags', 'frag_keyframe+empty_moov',
+            '-f', 'mp4',
+            'pipe:1'
+        ]
+
+        import subprocess
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        def iter_stream():
+            try:
+                while True:
+                    data = proc.stdout.read(64 * 1024)
+                    if not data:
+                        break
+                    yield data
+            finally:
+                proc.terminate()
+
+        return Response(iter_stream(), mimetype="video/mp4", headers={'Accept-Ranges': 'bytes'})
+
 
     @app_main_flask.route('/download/<path:filename>')
     def flask_download_file(filename):

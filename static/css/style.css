@@ -929,6 +929,19 @@ body {
     box-shadow: 0 0 10px var(--primary-glow);
 }
 
+.btn-audio-fix {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--accent-emerald);
+    border-color: rgba(16, 185, 129, 0.3);
+}
+
+.btn-audio-fix:hover {
+    background: rgba(16, 185, 129, 0.3);
+    color: #FFF;
+    box-shadow: 0 0 14px rgba(16, 185, 129, 0.4);
+}
+
+
 .modal-footer-btns {
     display: flex;
     gap: 10px;

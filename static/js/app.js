@@ -428,6 +428,8 @@ document.addEventListener('DOMContentLoaded', () => {
         videoDownload.href = `/download/${encodeURIComponent(fileName)}`;
         
         const streamUrl = `${window.location.origin}/files/${encodeURIComponent(fileName)}`;
+        const transcodeUrl = `${window.location.origin}/transcode/${encodeURIComponent(fileName)}`;
+        
         videoPlayer.src = streamUrl;
         videoPlayer.playbackRate = 1.0;
         
@@ -436,11 +438,20 @@ document.addEventListener('DOMContentLoaded', () => {
             b.classList.toggle('active', b.dataset.speed === '1.0');
         });
 
+        // Audio Fix Transcode Button
+        const btnTranscode = document.getElementById('btn-transcode-audio');
+        if (btnTranscode) {
+            btnTranscode.onclick = () => {
+                showToast('Switching to AAC Audio Transcode Mode...', 'success');
+                videoPlayer.src = transcodeUrl;
+                videoPlayer.play().catch(e => console.log('Autoplay:', e));
+            };
+        }
+
         // External Player Button
         const btnExternal = document.getElementById('btn-open-external');
         if (btnExternal) {
             btnExternal.onclick = () => {
-                // Launch VLC app protocol or copy direct stream URL
                 window.location.href = `vlc://${streamUrl}`;
                 setTimeout(() => {
                     navigator.clipboard.writeText(streamUrl);
@@ -451,12 +462,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Error fallback for unsupported codecs
         videoPlayer.onerror = () => {
-            showToast('Codec error: Click "Open in VLC" for external playback', 'error');
+            showToast('Codec warning: Click "Fix Sound" or "Open in VLC"', 'error');
         };
 
         videoModal.style.display = 'flex';
-        videoPlayer.play().catch(e => console.log('Autoplay:', e));
+        videoPlayer.play().catch(e => console.log('Autoplay policy: user interaction required', e));
     }
+
 
     function closeVideoModal() {
         videoPlayer.pause(); 
