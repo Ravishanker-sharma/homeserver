@@ -122,6 +122,64 @@ def upload_file():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app_main.route('/api/upload/chunk', methods=['POST'])
+def upload_chunk():
+    """Handles chunked file uploads for high-speed, reliable large file transfers."""
+    try:
+        file_chunk = request.files.get('chunk')
+        upload_id = secure_filename(request.form.get('upload_id', ''))
+        filename = secure_filename(request.form.get('filename', ''))
+        chunk_index = int(request.form.get('chunk_index', 0))
+        total_chunks = int(request.form.get('total_chunks', 1))
+
+        if not file_chunk or not upload_id or not filename:
+            return jsonify({'success': False, 'error': 'Missing chunk parameters'}), 400
+
+        chunk_dir = os.path.join(app_main.config['UPLOAD_FOLDER'], '.chunks', upload_id)
+        os.makedirs(chunk_dir, exist_ok=True)
+
+        chunk_filepath = os.path.join(chunk_dir, f"chunk_{chunk_index:05d}")
+        file_chunk.save(chunk_filepath)
+
+        # Check if all chunks have been received
+        received_chunks = len([f for f in os.listdir(chunk_dir) if f.startswith('chunk_')])
+        if received_chunks == total_chunks:
+            # Merge chunks into final destination file
+            destination = os.path.join(app_main.config['UPLOAD_FOLDER'], filename)
+            if os.path.exists(destination):
+                base, ext = os.path.splitext(filename)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"{base}_{timestamp}{ext}"
+                destination = os.path.join(app_main.config['UPLOAD_FOLDER'], filename)
+
+            with open(destination, 'wb') as final_file:
+                for i in range(total_chunks):
+                    c_path = os.path.join(chunk_dir, f"chunk_{i:05d}")
+                    if os.path.exists(c_path):
+                        with open(c_path, 'rb') as c_file:
+                            shutil.copyfileobj(c_file, final_file)
+
+            # Cleanup temporary chunk folder
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+
+            return jsonify({
+                'success': True,
+                'completed': True,
+                'message': 'File uploaded and assembled successfully',
+                'filename': filename
+            })
+
+        return jsonify({
+            'success': True,
+            'completed': False,
+            'received_chunks': received_chunks,
+            'total_chunks': total_chunks
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app_main.route('/api/files/<path:filename>', methods=['DELETE'])
 def delete_file(filename):
     try:

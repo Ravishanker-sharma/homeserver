@@ -1,9 +1,9 @@
 /**
  * Termux StreamDrive & Storage Vault Client JS
+ * Featuring High-Speed Chunked Resumable Uploader & Speed/ETA Telemetry
  */
 
 document.addEventListener('DOMContentLoaded', () => {
-    // State management
     let state = {
         files: [],
         currentCategory: 'all',
@@ -11,13 +11,19 @@ document.addEventListener('DOMContentLoaded', () => {
         storage: null
     };
 
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB Chunks
+
     // DOM Elements
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input');
+    const folderInput = document.getElementById('folder-input');
     const btnBrowse = document.getElementById('btn-browse');
+    const btnBrowseFolder = document.getElementById('btn-browse-folder');
+    
     const uploadQueue = document.getElementById('upload-queue');
     const queueList = document.getElementById('queue-list');
-    const uploadCount = document.getElementById('upload-count');
+    const queueOverallStats = document.getElementById('queue-overall-stats');
+    const btnClearQueue = document.getElementById('btn-clear-queue');
     
     const fileGrid = document.getElementById('file-grid');
     const emptyState = document.getElementById('empty-state');
@@ -50,33 +56,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const audioTitle = document.getElementById('audio-modal-title');
     const closeAudioBtn = document.getElementById('close-audio-modal');
 
-    // Category Icons Map
     const categoryIcons = {
-        video: '🎥',
-        audio: '🎵',
-        image: '🖼️',
-        document: '📄',
-        archive: '📦',
-        other: '📎'
+        video: '🎥', audio: '🎵', image: '🖼️', document: '📄', archive: '📦', other: '📎'
     };
 
-    // ==========================================
-    // INITIALIZATION & POLLING
-    // ==========================================
     init();
 
     function init() {
         loadStorageInfo();
         loadFilesList();
         setupEventListeners();
-        
-        // Refresh storage metrics every 30 seconds
         setInterval(loadStorageInfo, 30000);
     }
 
-    // ==========================================
-    // API CALLS
-    // ==========================================
     async function loadStorageInfo() {
         try {
             const response = await fetch('/api/storage');
@@ -99,26 +91,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderFiles();
             }
         } catch (err) {
-            console.error('Failed to load file list:', err);
             showToast('Error loading file list', 'error');
         }
     }
 
-    // ==========================================
-    // RENDER FUNCTIONS
-    // ==========================================
     function renderStorage(storage) {
         if (!storage) return;
-        
         storageBar.style.width = `${storage.percent_used}%`;
         storagePercent.textContent = `${storage.percent_used}%`;
         statUsed.textContent = storage.used_formatted;
         statFree.textContent = storage.free_formatted;
         statTotal.textContent = storage.total_formatted;
-        
         storageSub.textContent = `${storage.free_formatted} available space out of ${storage.total_formatted}`;
         
-        // Highlight warning color if disk is > 85% full
         if (storage.percent_used > 85) {
             storageBar.style.background = 'linear-gradient(90deg, #F59E0B, #F43F5E)';
         } else {
@@ -141,10 +126,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         emptyState.style.display = 'none';
         fileGrid.style.display = 'grid';
-        
         fileGrid.innerHTML = filtered.map(file => createFileCardHTML(file)).join('');
-        
-        // Attach action handlers to dynamic buttons
         attachFileCardListeners();
     }
 
@@ -212,42 +194,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function attachFileCardListeners() {
         document.querySelectorAll('[data-action="stream-video"]').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const encodedName = btn.dataset.file;
-                const fileName = decodeURIComponent(encodedName);
-                openVideoModal(fileName);
-            });
+            btn.addEventListener('click', () => openVideoModal(decodeURIComponent(btn.dataset.file)));
         });
-
         document.querySelectorAll('[data-action="stream-audio"]').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const encodedName = btn.dataset.file;
-                const fileName = decodeURIComponent(encodedName);
-                openAudioModal(fileName);
-            });
+            btn.addEventListener('click', () => openAudioModal(decodeURIComponent(btn.dataset.file)));
         });
-
         document.querySelectorAll('[data-action="preview-image"]').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const encodedName = btn.dataset.file;
-                const fileName = decodeURIComponent(encodedName);
-                openImageModal(fileName);
-            });
+            btn.addEventListener('click', () => openImageModal(decodeURIComponent(btn.dataset.file)));
         });
-
         document.querySelectorAll('[data-action="copy-link"]').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const url = btn.dataset.url;
-                navigator.clipboard.writeText(url);
+            btn.addEventListener('click', () => {
+                navigator.clipboard.writeText(btn.dataset.url);
                 showToast('Stream link copied to clipboard!', 'success');
             });
         });
-
         document.querySelectorAll('[data-action="delete"]').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
-                const encodedName = btn.dataset.file;
-                const fileName = decodeURIComponent(encodedName);
-                if (confirm(`Are you sure you want to delete "${fileName}"?`)) {
+            btn.addEventListener('click', async () => {
+                const fileName = decodeURIComponent(btn.dataset.file);
+                if (confirm(`Delete file "${fileName}"?`)) {
                     await deleteFile(fileName);
                 }
             });
@@ -255,14 +219,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================
-    // UPLOAD LOGIC
+    // CHUNKED UPLOADER ENGINE
     // ==========================================
     function setupEventListeners() {
-        // Browse button & File input
         btnBrowse.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', (e) => handleFilesSelect(e.target.files));
+        btnBrowseFolder.addEventListener('click', () => folderInput.click());
+        
+        fileInput.addEventListener('change', (e) => handleSelectedFiles(Array.from(e.target.files)));
+        folderInput.addEventListener('change', (e) => handleSelectedFiles(Array.from(e.target.files)));
 
-        // Drag and Drop
+        btnClearQueue.addEventListener('click', () => {
+            queueList.innerHTML = '';
+            uploadQueue.style.display = 'none';
+        });
+
+        // Drag & Drop
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             dropZone.addEventListener(eventName, preventDefaults, false);
         });
@@ -276,9 +247,8 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         dropZone.addEventListener('drop', (e) => {
-            const dt = e.dataTransfer;
-            const files = dt.files;
-            handleFilesSelect(files);
+            const files = Array.from(e.dataTransfer.files);
+            handleSelectedFiles(files);
         });
 
         // Search & Category Filters
@@ -296,20 +266,14 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
 
-        // Modal close buttons
+        // Modals
         closeVideoBtn.addEventListener('click', closeVideoModal);
         closeImageBtn.addEventListener('click', () => imageModal.style.display = 'none');
         closeAudioBtn.addEventListener('click', closeAudioModal);
 
-        videoModal.addEventListener('click', (e) => {
-            if (e.target === videoModal) closeVideoModal();
-        });
-        imageModal.addEventListener('click', (e) => {
-            if (e.target === imageModal) imageModal.style.display = 'none';
-        });
-        audioModal.addEventListener('click', (e) => {
-            if (e.target === audioModal) closeAudioModal();
-        });
+        videoModal.addEventListener('click', (e) => { if (e.target === videoModal) closeVideoModal(); });
+        imageModal.addEventListener('click', (e) => { if (e.target === imageModal) imageModal.style.display = 'none'; });
+        audioModal.addEventListener('click', (e) => { if (e.target === audioModal) closeAudioModal(); });
     }
 
     function preventDefaults(e) {
@@ -317,72 +281,107 @@ document.addEventListener('DOMContentLoaded', () => {
         e.stopPropagation();
     }
 
-    function handleFilesSelect(filesList) {
-        if (!filesList || filesList.length === 0) return;
-        
+    function handleSelectedFiles(files) {
+        if (!files || files.length === 0) return;
         uploadQueue.style.display = 'block';
-        uploadCount.textContent = `${filesList.length} item(s)`;
-        queueList.innerHTML = '';
-        
-        uploadFiles(Array.from(filesList));
+
+        let totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+        queueOverallStats.textContent = `Batch Total: ${formatBytes(totalBytes)} (${files.length} items)`;
+
+        files.forEach(file => uploadFileInChunks(file));
     }
 
-    function uploadFiles(files) {
-        const formData = new FormData();
-        files.forEach(file => formData.append('files', file));
+    async function uploadFileInChunks(file) {
+        const uploadId = 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
+        // Create UI Queue Card
         const queueItem = document.createElement('div');
         queueItem.className = 'queue-item';
+        queueItem.id = `q_${uploadId}`;
         queueItem.innerHTML = `
             <div class="queue-info">
-                <span>Uploading ${files.length} file(s)...</span>
-                <span id="upload-percent">0%</span>
+                <span class="queue-file-title" title="${escapeHTML(file.name)}">${escapeHTML(file.name)} (${formatBytes(file.size)})</span>
+                <div class="queue-badges">
+                    <span class="badge-speed" id="speed_${uploadId}">0 MB/s</span>
+                    <span class="badge-eta" id="eta_${uploadId}">Calculating...</span>
+                    <span class="badge-status" id="percent_${uploadId}">0%</span>
+                </div>
             </div>
             <div class="queue-progress-bar">
-                <div class="queue-progress-fill" id="upload-progress-fill" style="width: 0%;"></div>
+                <div class="queue-progress-fill" id="bar_${uploadId}" style="width: 0%;"></div>
             </div>
         `;
         queueList.appendChild(queueItem);
 
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/upload', true);
+        const fillBar = document.getElementById(`bar_${uploadId}`);
+        const percentTxt = document.getElementById(`percent_${uploadId}`);
+        const speedTxt = document.getElementById(`speed_${uploadId}`);
+        const etaTxt = document.getElementById(`eta_${uploadId}`);
 
-        xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-                const percent = Math.round((e.loaded / e.total) * 100);
-                document.getElementById('upload-progress-fill').style.width = `${percent}%`;
-                document.getElementById('upload-percent').textContent = `${percent}%`;
-            }
-        };
+        let startTime = Date.now();
+        let bytesUploaded = 0;
 
-        xhr.onload = () => {
-            if (xhr.status === 200) {
-                const res = JSON.parse(xhr.responseText);
-                if (res.success) {
-                    showToast(`Uploaded ${files.length} file(s) successfully!`, 'success');
-                    loadFilesList();
-                    loadStorageInfo();
-                    setTimeout(() => { uploadQueue.style.display = 'none'; }, 2000);
-                } else {
-                    showToast(res.error || 'Upload failed', 'error');
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+            const start = chunkIndex * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunkBlob = file.slice(start, end);
+
+            const formData = new FormData();
+            formData.append('chunk', chunkBlob);
+            formData.append('upload_id', uploadId);
+            formData.append('filename', file.name);
+            formData.append('chunk_index', chunkIndex);
+            formData.append('total_chunks', totalChunks);
+
+            try {
+                const response = await fetch('/api/upload/chunk', {
+                    method: 'POST',
+                    body: formData
+                });
+                const res = await response.json();
+
+                if (!res.success) {
+                    throw new Error(res.error || 'Chunk upload error');
                 }
-            } else {
-                showToast('Upload error occurred', 'error');
-            }
-        };
 
-        xhr.onerror = () => showToast('Network connection error', 'error');
-        xhr.send(formData);
+                bytesUploaded += (end - start);
+                const percent = Math.round((bytesUploaded / file.size) * 100);
+                fillBar.style.width = `${percent}%`;
+                percentTxt.textContent = `${percent}%`;
+
+                // Calculate Speed & ETA
+                const elapsedTime = (Date.now() - startTime) / 1000;
+                const speed = bytesUploaded / elapsedTime; // Bytes/sec
+                const remainingBytes = file.size - bytesUploaded;
+                const etaSeconds = speed > 0 ? Math.ceil(remainingBytes / speed) : 0;
+
+                speedTxt.textContent = `${formatBytes(speed)}/s`;
+                etaTxt.textContent = percent === 100 ? 'Completed' : `ETA: ${formatETA(etaSeconds)}`;
+
+            } catch (err) {
+                speedTxt.textContent = 'Failed';
+                etaTxt.textContent = '';
+                percentTxt.textContent = 'Error';
+                fillBar.style.background = 'var(--accent-rose)';
+                showToast(`Failed uploading ${file.name}`, 'error');
+                return;
+            }
+        }
+
+        // Upload Complete
+        fillBar.style.background = 'var(--accent-emerald)';
+        speedTxt.textContent = '✓ Done';
+        etaTxt.textContent = '';
+        showToast(`Uploaded ${file.name} successfully!`, 'success');
+        
+        loadFilesList();
+        loadStorageInfo();
     }
 
-    // ==========================================
-    // DELETE FILE
-    // ==========================================
     async function deleteFile(fileName) {
         try {
-            const response = await fetch(`/api/files/${encodeURIComponent(fileName)}`, {
-                method: 'DELETE'
-            });
+            const response = await fetch(`/api/files/${encodeURIComponent(fileName)}`, { method: 'DELETE' });
             const data = await response.json();
             if (data.success) {
                 showToast(`Deleted ${fileName}`, 'success');
@@ -396,37 +395,29 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // ==========================================
-    // MODAL CONTROL & MEDIA STREAMING
-    // ==========================================
     function openVideoModal(fileName) {
         const fileObj = state.files.find(f => f.name === fileName);
         videoTitle.textContent = fileName;
         videoInfo.textContent = fileObj ? fileObj.formatted_size : '';
         videoDownload.href = `/download/${encodeURIComponent(fileName)}`;
-        
         videoPlayer.src = `/files/${encodeURIComponent(fileName)}`;
         videoModal.style.display = 'flex';
-        videoPlayer.play().catch(e => console.log('Autoplay prevented:', e));
+        videoPlayer.play().catch(e => console.log('Autoplay:', e));
     }
 
     function closeVideoModal() {
-        videoPlayer.pause();
-        videoPlayer.src = '';
-        videoModal.style.display = 'none';
+        videoPlayer.pause(); videoPlayer.src = ''; videoModal.style.display = 'none';
     }
 
     function openAudioModal(fileName) {
         audioTitle.textContent = fileName;
         audioPlayer.src = `/files/${encodeURIComponent(fileName)}`;
         audioModal.style.display = 'flex';
-        audioPlayer.play().catch(e => console.log('Autoplay prevented:', e));
+        audioPlayer.play().catch(e => console.log('Autoplay:', e));
     }
 
     function closeAudioModal() {
-        audioPlayer.pause();
-        audioPlayer.src = '';
-        audioModal.style.display = 'none';
+        audioPlayer.pause(); audioPlayer.src = ''; audioModal.style.display = 'none';
     }
 
     function openImageModal(fileName) {
@@ -435,17 +426,27 @@ document.addEventListener('DOMContentLoaded', () => {
         imageModal.style.display = 'flex';
     }
 
-    // ==========================================
-    // UTILS & TOASTS
-    // ==========================================
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function formatETA(seconds) {
+        if (seconds <= 0) return '0s';
+        if (seconds < 60) return `${seconds}s`;
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return `${m}m ${s}s`;
+    }
+
     function showToast(message, type = 'success') {
         const container = document.getElementById('toast-container');
         const toast = document.createElement('div');
         toast.className = `toast toast-${type}`;
-        
-        const icon = type === 'success' ? '✓' : '⚠️';
-        toast.innerHTML = `<span>${icon}</span> <span>${escapeHTML(message)}</span>`;
-        
+        toast.innerHTML = `<span>${type === 'success' ? '✓' : '⚠️'}</span> <span>${escapeHTML(message)}</span>`;
         container.appendChild(toast);
         setTimeout(() => {
             toast.style.opacity = '0';
@@ -454,8 +455,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function escapeHTML(str) {
-        return str.replace(/[&<>'"]/g, 
-            tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
-        );
+        return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
     }
 });
