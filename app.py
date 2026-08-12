@@ -88,6 +88,10 @@ def run_relay_download(task_id, target_url, filename):
     relay_tasks[task_id] = {'status': 'downloading', 'progress': 0, 'filename': filename}
     try:
         resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, stream=True, timeout=15)
+        if resp.status_code != 200:
+            relay_tasks[task_id] = {'status': 'error', 'error': f'Link expired or invalid (HTTP {resp.status_code}). Please generate a new fastdl link.'}
+            return
+            
         mime = resp.headers.get('Content-Type', '').lower()
         
         if 'mpegurl' in mime or 'm3u8' in target_url.lower():
@@ -102,13 +106,22 @@ def run_relay_download(task_id, target_url, filename):
             filepath = os.path.join(RELAY_FOLDER, filename)
             
             total_segments = len(segments)
+            if total_segments == 0:
+                relay_tasks[task_id] = {'status': 'error', 'error': 'Invalid HLS playlist: no segments found'}
+                return
+                
             downloaded = 0
             
             with open(filepath, 'wb') as f:
                 for seg in segments:
                     seg_url = domain + seg if seg.startswith('/') else seg
                     r = requests.get(seg_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
-                    f.write(r.content)
+                    if r.status_code == 200:
+                        f.write(r.content)
+                    else:
+                        relay_tasks[task_id] = {'status': 'error', 'error': f'Failed to download chunk (HTTP {r.status_code}). Link likely expired.'}
+                        os.remove(filepath)
+                        return
                     downloaded += 1
                     relay_tasks[task_id]['progress'] = int((downloaded / total_segments) * 100)
                     
