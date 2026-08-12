@@ -1214,19 +1214,77 @@ body {
     .app-header {
         flex-direction: column;
         align-items: flex-start;
-        gap: 16px;
+        gap: 12px;
+    }
+    
+    .storage-metrics {
+        width: 100%;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .metric {
+        width: 100%;
+        justify-content: space-between;
     }
     
     .explorer-toolbar {
         flex-direction: column;
         align-items: stretch;
+        gap: 12px;
     }
     
     .category-pills {
         width: 100%;
+        overflow-x: auto;
+        padding-bottom: 4px;
     }
     
     .file-grid {
         grid-template-columns: 1fr;
+    }
+
+    .main-container {
+        padding: 10px;
+    }
+
+    .upload-box {
+        padding: 20px 10px;
+    }
+
+    .navbar {
+        padding: 10px;
+    }
+
+    .navbar-brand h1 {
+        font-size: 18px;
+    }
+
+    .modal-content, .video-modal-content, .relay-container {
+        width: 95%;
+        margin: 10% auto;
+        padding: 15px;
+    }
+    
+    .relay-container {
+        margin: 5% auto;
+    }
+
+    .result-actions {
+        flex-direction: column;
+    }
+    
+    .result-actions .btn {
+        width: 100%;
+        text-align: center;
+        justify-content: center;
+    }
+
+    .video-modal-content {
+        margin: 5% auto;
+    }
+
+    video {
+        border-radius: 8px;
     }
 }

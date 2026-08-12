@@ -418,12 +418,16 @@ if USE_FASTAPI:
         target_url = data.get('url', '').strip()
         if not target_url:
             return JSONResponse(content={'success': False, 'error': 'URL required'}, status_code=400)
+            
+        terabox_domains = ['terabox.com', 'teraboxapp.com', '1024tera.com', 'terafileshare.com', 'mirrobox.com', 'freeterabox.com']
+        if any(d in target_url for d in terabox_domains):
+            return JSONResponse(content={'success': False, 'error': 'Terabox requires premium login. Free scraper APIs are dead. Please provide a generic Direct Link instead.'}, status_code=400)
+            
         try:
             ext = target_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in target_url else ''
             if ext in ['mp4', 'mkv', 'webm', 'avi', 'mov', 'mp3', 'wav', 'png', 'jpg', 'jpeg', 'zip', 'pdf']:
                 filename = target_url.split('/')[-1].split('?')[0] or 'media_asset'
                 return {'success': True, 'download_url': target_url, 'filename': filename, 'formatted_size': 'Direct Link', 'category': get_file_category('', filename)}
-
             headers = {'User-Agent': 'Mozilla/5.0'}
             resp = requests.get(target_url, headers=headers, timeout=12, allow_redirects=True)
             final_url = resp.url
@@ -605,6 +609,11 @@ else:
     def flask_relay_resolve():
         if not session.get('auth'): return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         target_url = request.json.get('url', '').strip()
+        
+        terabox_domains = ['terabox.com', 'teraboxapp.com', '1024tera.com', 'terafileshare.com', 'mirrobox.com', 'freeterabox.com']
+        if any(d in target_url for d in terabox_domains):
+            return jsonify({'success': False, 'error': 'Terabox requires premium login. Free scraper APIs are dead. Please provide a generic Direct Link instead.'}), 400
+            
         resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=12)
         filename = resp.url.split('/')[-1].split('?')[0] or 'asset'
         return jsonify({'success': True, 'download_url': resp.url, 'filename': filename, 'formatted_size': 'Direct Link', 'category': get_file_category(resp.headers.get('Content-Type', ''), filename)})
