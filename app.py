@@ -114,7 +114,8 @@ def run_relay_download(task_id, target_url, filename):
             
             with open(filepath, 'wb') as f:
                 for seg in segments:
-                    seg_url = domain + seg if seg.startswith('/') else seg
+                    # Use urljoin to correctly resolve both absolute and relative segment paths
+                    seg_url = urllib.parse.urljoin(target_url, seg)
                     r = requests.get(seg_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
                     if r.status_code == 200:
                         f.write(r.content)
@@ -578,7 +579,7 @@ if USE_FASTAPI:
             return JSONResponse(content={'success': False, 'error': 'Unauthorized'}, status_code=401)
         task = relay_tasks.get(task_id)
         if not task: return JSONResponse(content={'success': False, 'error': 'Not found'}, status_code=404)
-        return {'success': True, 'status': task['status'], 'progress': task.get('progress', 0), 'filename': task.get('filename')}
+        return {'success': True, 'status': task['status'], 'progress': task.get('progress', 0), 'filename': task.get('filename'), 'error': task.get('error')}
 
     @app_relay.get("/api/relay/files")
     async def relay_files(request: Request):
