@@ -118,10 +118,12 @@ document.addEventListener('DOMContentLoaded', () => {
             resultIcon.textContent = '🎬';
             videoPlayer.style.display = 'block';
             videoPlayer.src = currentPayloadUrl;
+            videoPlayer.play().catch(e => console.log('Autoplay blocked:', e));
         } else if (cat === 'audio' || (currentPayloadUrl.includes('.mp3') || currentPayloadUrl.includes('.wav'))) {
             resultIcon.textContent = '🎵';
             audioPlayer.style.display = 'block';
             audioPlayer.src = currentPayloadUrl;
+            audioPlayer.play().catch(e => console.log('Autoplay blocked:', e));
         } else if (cat === 'image' || (currentPayloadUrl.includes('.jpg') || currentPayloadUrl.includes('.png'))) {
             resultIcon.textContent = '🖼️';
             imagePreview.style.display = 'block';

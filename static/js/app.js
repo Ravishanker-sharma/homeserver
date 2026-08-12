@@ -434,6 +434,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         videoPlayer.src = streamUrl;
         videoPlayer.playbackRate = 1.0;
+        videoPlayer.play().catch(e => console.log('Autoplay blocked:', e));
         
         // Reset active speed button
         document.querySelectorAll('.btn-speed').forEach(b => {
