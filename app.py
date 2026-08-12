@@ -86,19 +86,46 @@ def run_background_conversion(task_id, filepath, out_filepath):
 
 def run_relay_download(task_id, target_url, filename):
     relay_tasks[task_id] = {'status': 'downloading', 'progress': 0, 'filename': filename}
-    filepath = os.path.join(RELAY_FOLDER, filename)
     try:
         resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, stream=True, timeout=15)
-        total_size = int(resp.headers.get('content-length', 0))
-        downloaded = 0
-        with open(filepath, 'wb') as f:
-            for chunk in resp.iter_content(chunk_size=1024*1024):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        relay_tasks[task_id]['progress'] = int((downloaded / total_size) * 100)
-        relay_tasks[task_id] = {'status': 'completed', 'filename': filename}
+        mime = resp.headers.get('Content-Type', '').lower()
+        
+        if 'mpegurl' in mime or 'm3u8' in target_url.lower():
+            # It's an HLS stream (like Terabox fastdl). Download all chunks and merge.
+            playlist = resp.text
+            segments = [line.strip() for line in playlist.split('\n') if line.strip() and not line.startswith('#')]
+            
+            domain = "/".join(resp.url.split('/')[:3])
+            
+            # Change extension to .ts because we are concatenating raw mpegts chunks
+            filename = filename.rsplit('.', 1)[0] + '.ts'
+            filepath = os.path.join(RELAY_FOLDER, filename)
+            
+            total_segments = len(segments)
+            downloaded = 0
+            
+            with open(filepath, 'wb') as f:
+                for seg in segments:
+                    seg_url = domain + seg if seg.startswith('/') else seg
+                    r = requests.get(seg_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+                    f.write(r.content)
+                    downloaded += 1
+                    relay_tasks[task_id]['progress'] = int((downloaded / total_segments) * 100)
+                    
+            relay_tasks[task_id] = {'status': 'completed', 'filename': filename}
+        else:
+            # Standard direct download
+            filepath = os.path.join(RELAY_FOLDER, filename)
+            total_size = int(resp.headers.get('content-length', 0))
+            downloaded = 0
+            with open(filepath, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            relay_tasks[task_id]['progress'] = int((downloaded / total_size) * 100)
+            relay_tasks[task_id] = {'status': 'completed', 'filename': filename}
     except Exception as e:
         relay_tasks[task_id] = {'status': 'error', 'error': str(e)}
 
