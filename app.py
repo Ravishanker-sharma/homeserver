@@ -3,57 +3,21 @@ import re
 import math
 import shutil
 import mimetypes
-import threading
-import requests
+import multiprocessing
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response, abort, session
+from typing import List, Optional
+
+import requests
+import uvicorn
+from fastapi import FastAPI, Request, Form, File, UploadFile, HTTPException, Depends, status
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse, Response, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from werkzeug.utils import secure_filename
 
 # ==============================================================================
-# SERVER 1: PRIMARY FILE STORAGE DRIVE (PORT 8000)
+# MEDIA MIME TYPES & METADATA REGISTRY
 # ==============================================================================
-app_main = Flask(__name__, template_folder='templates', static_folder='static')
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
-TRASH_FOLDER = os.path.join(UPLOAD_FOLDER, '.trash')
-CHUNKS_FOLDER = os.path.join(UPLOAD_FOLDER, '.chunks')
-
-app_main.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app_main.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max upload limit
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(TRASH_FOLDER, exist_ok=True)
-os.makedirs(CHUNKS_FOLDER, exist_ok=True)
-
-def format_bytes(size):
-    if size == 0:
-        return "0 B"
-    size_name = ("B", "KB", "MB", "GB", "TB")
-    i = int(math.floor(math.log(size, 1024)))
-    p = math.pow(1024, i)
-    s = round(size / p, 2)
-    return f"{s} {size_name[i]}"
-
-def get_dir_size(path):
-    total = 0
-    if os.path.exists(path):
-        for root, dirs, files in os.walk(path):
-            for f in files:
-                fp = os.path.join(root, f)
-                if os.path.isfile(fp):
-                    total += os.path.getsize(fp)
-    return total
-
-def get_cache_info():
-    trash_bytes = get_dir_size(TRASH_FOLDER)
-    chunks_bytes = get_dir_size(CHUNKS_FOLDER)
-    total_cache = trash_bytes + chunks_bytes
-    return {
-        'trash_bytes': trash_bytes,
-        'chunks_bytes': chunks_bytes,
-        'total_bytes': total_cache,
-        'total_formatted': format_bytes(total_cache)
-    }
-
 MEDIA_MIME_TYPES = {
     'mp4': 'video/mp4',
     'mkv': 'video/x-matroska',
@@ -72,14 +36,23 @@ MEDIA_MIME_TYPES = {
     'opus': 'audio/opus'
 }
 
-def get_media_mimetype(filepath):
+def format_bytes(size: int) -> str:
+    if size == 0:
+        return "0 B"
+    size_name = ("B", "KB", "MB", "GB", "TB")
+    i = int(math.floor(math.log(size, 1024)))
+    p = math.pow(1024, i)
+    s = round(size / p, 2)
+    return f"{s} {size_name[i]}"
+
+def get_media_mimetype(filepath: str) -> str:
     ext = filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
     if ext in MEDIA_MIME_TYPES:
         return MEDIA_MIME_TYPES[ext]
     guessed, _ = mimetypes.guess_type(filepath)
     return guessed or 'application/octet-stream'
 
-def get_file_category(mime_type, filename):
+def get_file_category(mime_type: str, filename: str) -> str:
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     if (mime_type and mime_type.startswith('video/')) or ext in ['mp4', 'mkv', 'webm', 'avi', 'mov', 'flv', 'm4v', 'ts']:
         return 'video'
@@ -93,9 +66,39 @@ def get_file_category(mime_type, filename):
         return 'archive'
     return 'other'
 
+def get_dir_size(path: str) -> int:
+    total = 0
+    if os.path.exists(path):
+        for root, dirs, files in os.walk(path):
+            for f in files:
+                fp = os.path.join(root, f)
+                if os.path.isfile(fp):
+                    total += os.path.getsize(fp)
+    return total
+
+# Directories
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+TRASH_FOLDER = os.path.join(UPLOAD_FOLDER, '.trash')
+CHUNKS_FOLDER = os.path.join(UPLOAD_FOLDER, '.chunks')
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(TRASH_FOLDER, exist_ok=True)
+os.makedirs(CHUNKS_FOLDER, exist_ok=True)
+
+def get_cache_info():
+    trash_bytes = get_dir_size(TRASH_FOLDER)
+    chunks_bytes = get_dir_size(CHUNKS_FOLDER)
+    total_cache = trash_bytes + chunks_bytes
+    return {
+        'trash_bytes': trash_bytes,
+        'chunks_bytes': chunks_bytes,
+        'total_bytes': total_cache,
+        'total_formatted': format_bytes(total_cache)
+    }
+
 def get_storage_info():
-    path = app_main.config['UPLOAD_FOLDER']
-    total, used, free = shutil.disk_usage(path)
+    total, used, free = shutil.disk_usage(UPLOAD_FOLDER)
     percent_used = round((used / total) * 100, 1)
     cache = get_cache_info()
     return {
@@ -109,26 +112,34 @@ def get_storage_info():
         'cache': cache
     }
 
-@app_main.route('/')
-def main_index():
-    return render_template('index.html')
 
-@app_main.route('/api/storage', methods=['GET'])
-def api_storage():
+# ==============================================================================
+# FASTAPI SERVER 1: PRIMARY FILE STORAGE DRIVE & STREAMER (PORT 8000)
+# ==============================================================================
+app_main = FastAPI(title="Termux Storage Drive", version="2.0.0")
+templates_main = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+app_main.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+
+@app_main.get("/", response_class=HTMLResponse)
+async def main_index(request: Request):
+    return templates_main.TemplateResponse("index.html", {"request": request})
+
+@app_main.get("/api/storage")
+async def api_storage():
     try:
-        return jsonify({'success': True, 'storage': get_storage_info()})
+        return {"success": True, "storage": get_storage_info()}
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app_main.route('/api/cache/info', methods=['GET'])
-def api_cache_info():
+@app_main.get("/api/cache/info")
+async def api_cache_info():
     try:
-        return jsonify({'success': True, 'cache': get_cache_info()})
+        return {"success": True, "cache": get_cache_info()}
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app_main.route('/api/cache/purge', methods=['POST'])
-def api_cache_purge():
+@app_main.post("/api/cache/purge")
+async def api_cache_purge():
     try:
         cache_before = get_cache_info()['total_bytes']
         if os.path.exists(TRASH_FOLDER):
@@ -142,24 +153,23 @@ def api_cache_purge():
         reclaimed_bytes = cache_before
         reclaimed_formatted = format_bytes(reclaimed_bytes)
         
-        return jsonify({
+        return {
             'success': True,
             'message': f'Successfully reclaimed {reclaimed_formatted} storage',
             'reclaimed_bytes': reclaimed_bytes,
             'reclaimed_formatted': reclaimed_formatted,
             'storage': get_storage_info(),
             'cache': get_cache_info()
-        })
+        }
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app_main.route('/api/files', methods=['GET'])
-def list_files():
+@app_main.get("/api/files")
+async def list_files():
     try:
         files = []
-        folder = app_main.config['UPLOAD_FOLDER']
-        for filename in os.listdir(folder):
-            filepath = os.path.join(folder, filename)
+        for filename in os.listdir(UPLOAD_FOLDER):
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
             if os.path.isfile(filepath) and not filename.startswith('.'):
                 stat = os.stat(filepath)
                 mime_type = get_media_mimetype(filepath)
@@ -175,64 +185,59 @@ def list_files():
                     'download_url': f'/download/{filename}'
                 })
         files.sort(key=lambda x: x['modified'], reverse=True)
-        return jsonify({'success': True, 'files': files, 'count': len(files)})
+        return {'success': True, 'files': files, 'count': len(files)}
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app_main.route('/api/upload', methods=['POST'])
-def upload_file():
+@app_main.post("/api/upload")
+async def upload_file(files: List[UploadFile] = File(...)):
     try:
-        if 'files' not in request.files and 'file' not in request.files:
-            return jsonify({'success': False, 'error': 'No file part in request'}), 400
-        uploaded_files = request.files.getlist('files')
-        if not uploaded_files or (len(uploaded_files) == 1 and uploaded_files[0].filename == ''):
-            uploaded_files = request.files.getlist('file')
-        if not uploaded_files or uploaded_files[0].filename == '':
-            return jsonify({'success': False, 'error': 'No file selected for upload'}), 400
-            
         saved_files = []
-        for file in uploaded_files:
+        for file in files:
             if file and file.filename:
                 raw_filename = secure_filename(file.filename) or f"file_{int(datetime.now().timestamp())}"
-                destination = os.path.join(app_main.config['UPLOAD_FOLDER'], raw_filename)
+                destination = os.path.join(UPLOAD_FOLDER, raw_filename)
                 if os.path.exists(destination):
                     base, ext = os.path.splitext(raw_filename)
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                     raw_filename = f"{base}_{timestamp}{ext}"
-                    destination = os.path.join(app_main.config['UPLOAD_FOLDER'], raw_filename)
-                file.save(destination)
+                    destination = os.path.join(UPLOAD_FOLDER, raw_filename)
+                
+                with open(destination, "wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
                 saved_files.append(raw_filename)
                 
-        return jsonify({'success': True, 'message': f'Successfully uploaded {len(saved_files)} file(s)', 'saved_files': saved_files})
+        return {'success': True, 'message': f'Successfully uploaded {len(saved_files)} file(s)', 'saved_files': saved_files}
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app_main.route('/api/upload/chunk', methods=['POST'])
-def upload_chunk():
+@app_main.post("/api/upload/chunk")
+async def upload_chunk(
+    chunk: UploadFile = File(...),
+    upload_id: str = Form(...),
+    filename: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...)
+):
     try:
-        file_chunk = request.files.get('chunk')
-        upload_id = secure_filename(request.form.get('upload_id', ''))
-        filename = secure_filename(request.form.get('filename', ''))
-        chunk_index = int(request.form.get('chunk_index', 0))
-        total_chunks = int(request.form.get('total_chunks', 1))
+        safe_upload_id = secure_filename(upload_id)
+        safe_filename = secure_filename(filename)
 
-        if not file_chunk or not upload_id or not filename:
-            return jsonify({'success': False, 'error': 'Missing chunk parameters'}), 400
-
-        chunk_dir = os.path.join(app_main.config['UPLOAD_FOLDER'], '.chunks', upload_id)
+        chunk_dir = os.path.join(CHUNKS_FOLDER, safe_upload_id)
         os.makedirs(chunk_dir, exist_ok=True)
 
         chunk_filepath = os.path.join(chunk_dir, f"chunk_{chunk_index:05d}")
-        file_chunk.save(chunk_filepath)
+        with open(chunk_filepath, "wb") as buffer:
+            shutil.copyfileobj(chunk.file, buffer)
 
         received_chunks = len([f for f in os.listdir(chunk_dir) if f.startswith('chunk_')])
         if received_chunks == total_chunks:
-            destination = os.path.join(app_main.config['UPLOAD_FOLDER'], filename)
+            destination = os.path.join(UPLOAD_FOLDER, safe_filename)
             if os.path.exists(destination):
-                base, ext = os.path.splitext(filename)
+                base, ext = os.path.splitext(safe_filename)
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"{base}_{timestamp}{ext}"
-                destination = os.path.join(app_main.config['UPLOAD_FOLDER'], filename)
+                safe_filename = f"{base}_{timestamp}{ext}"
+                destination = os.path.join(UPLOAD_FOLDER, safe_filename)
 
             with open(destination, 'wb') as final_file:
                 for i in range(total_chunks):
@@ -242,175 +247,192 @@ def upload_chunk():
                             shutil.copyfileobj(c_file, final_file)
 
             shutil.rmtree(chunk_dir, ignore_errors=True)
+            return {'success': True, 'completed': True, 'message': 'File uploaded successfully', 'filename': safe_filename}
 
-            return jsonify({
-                'success': True,
-                'completed': True,
-                'message': 'File uploaded and assembled successfully',
-                'filename': filename
-            })
-
-        return jsonify({
-            'success': True,
-            'completed': False,
-            'received_chunks': received_chunks,
-            'total_chunks': total_chunks
-        })
-
+        return {'success': True, 'completed': False, 'received_chunks': received_chunks, 'total_chunks': total_chunks}
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app_main.route('/api/files/<path:filename>', methods=['DELETE'])
-def delete_file(filename):
+@app_main.delete("/api/files/{filename}")
+async def delete_file(filename: str):
     try:
         safe_name = secure_filename(filename)
-        filepath = os.path.join(app_main.config['UPLOAD_FOLDER'], safe_name)
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
         if not os.path.exists(filepath):
-            return jsonify({'success': False, 'error': 'File not found'}), 404
-            
+            raise HTTPException(status_code=404, detail="File not found")
+
         trash_destination = os.path.join(TRASH_FOLDER, safe_name)
         if os.path.exists(trash_destination):
             base, ext = os.path.splitext(safe_name)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             trash_destination = os.path.join(TRASH_FOLDER, f"{base}_{timestamp}{ext}")
-            
+
         shutil.move(filepath, trash_destination)
-        return jsonify({'success': True, 'message': f'File {safe_name} moved to trash'})
+        return {'success': True, 'message': f'File {safe_name} moved to trash'}
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app_main.route('/files/<path:filename>')
-def serve_file(filename):
-    """Serves media files with Werkzeug native conditional Byte-Range support for smooth streaming & audio."""
+@app_main.get("/files/{filename}")
+async def serve_file(filename: str, request: Request):
+    """High-performance async Byte-Range media streaming endpoint."""
     safe_name = secure_filename(filename)
-    filepath = os.path.join(app_main.config['UPLOAD_FOLDER'], safe_name)
+    filepath = os.path.join(UPLOAD_FOLDER, safe_name)
     if not os.path.isfile(filepath):
-        abort(404)
+        raise HTTPException(status_code=404, detail="File not found")
 
+    file_size = os.path.getsize(filepath)
     mimetype = get_media_mimetype(filepath)
+    range_header = request.headers.get("range")
 
-    response = send_from_directory(
-        app_main.config['UPLOAD_FOLDER'],
-        safe_name,
-        conditional=True,
-        mimetype=mimetype
-    )
-    response.headers['Accept-Ranges'] = 'bytes'
-    response.headers['Cache-Control'] = 'public, max-age=3600'
-    return response
+    if range_header:
+        byte1, byte2 = 0, None
+        match = re.search(r'bytes=(\d+)-(\d+)?', range_header)
+        if match:
+            g = match.groups()
+            byte1 = int(g[0])
+            if g[1]:
+                byte2 = int(g[1])
 
+        chunk_size = 1024 * 1024 * 2  # 2MB chunks for smooth streaming
+        if byte2 is None:
+            byte2 = min(byte1 + chunk_size - 1, file_size - 1)
 
-@app_main.route('/download/<path:filename>')
-def download_file(filename):
+        length = byte2 - byte1 + 1
+
+        def iterfile():
+            with open(filepath, 'rb') as f:
+                f.seek(byte1)
+                remaining = length
+                while remaining > 0:
+                    read_bytes = min(1024 * 64, remaining)
+                    data = f.read(read_bytes)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = {
+            'Content-Range': f'bytes {byte1}-{byte2}/{file_size}',
+            'Accept-Ranges': 'bytes',
+            'Content-Length': str(length),
+            'Cache-Control': 'public, max-age=3600'
+        }
+        return StreamingResponse(iterfile(), status_code=206, media_type=mimetype, headers=headers)
+
+    return FileResponse(filepath, media_type=mimetype, headers={'Accept-Ranges': 'bytes'})
+
+@app_main.get("/download/{filename}")
+async def download_file(filename: str):
     safe_name = secure_filename(filename)
-    return send_from_directory(app_main.config['UPLOAD_FOLDER'], safe_name, as_attachment=True)
+    filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+    if not os.path.isfile(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(filepath, filename=safe_name)
 
 
 # ==============================================================================
-# SERVER 2: DISCRETE RELAY NODE & ASSET GATEWAY (PORT 6969)
+# FASTAPI SERVER 2: DISCRETE RELAY NODE & GATEWAY (PORT 6969)
 # ==============================================================================
-app_relay = Flask(__name__, template_folder='templates', static_folder='static')
-app_relay.secret_key = 'nexus-gate-secret-key-6969'
+app_relay = FastAPI(title="Nexus Gate Relay", version="2.0.0")
+templates_relay = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+app_relay.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+
 GATE_PASSCODE = 'hiddenrarety'
+AUTH_COOKIE_NAME = 'gate_auth_session'
+AUTH_TOKEN_VALUE = 'nexus_authorized_6969'
 
-@app_relay.route('/')
-def relay_index():
-    is_auth = session.get('authenticated', False)
-    return render_template('relay.html', authenticated=is_auth)
+@app_relay.get("/", response_class=HTMLResponse)
+async def relay_index(request: Request):
+    auth_cookie = request.cookies.get(AUTH_COOKIE_NAME)
+    is_authenticated = (auth_cookie == AUTH_TOKEN_VALUE)
+    return templates_relay.TemplateResponse("relay.html", {"request": request, "authenticated": is_authenticated})
 
-@app_relay.route('/api/auth', methods=['POST'])
-def relay_auth():
-    data = request.get_json() or {}
+@app_relay.post("/api/auth")
+async def relay_auth(request: Request):
+    data = await request.json() or {}
     passcode = data.get('passcode', '')
     if passcode == GATE_PASSCODE:
-        session['authenticated'] = True
-        return jsonify({'success': True, 'message': 'Access Granted'})
-    return jsonify({'success': False, 'error': 'Invalid Passcode'}), 401
+        response = JSONResponse(content={'success': True, 'message': 'Access Granted'})
+        response.set_cookie(key=AUTH_COOKIE_NAME, value=AUTH_TOKEN_VALUE, httponly=True, max_age=86400 * 7)
+        return response
+    return JSONResponse(content={'success': False, 'error': 'Invalid Passcode'}, status_code=401)
 
-@app_relay.route('/api/logout', methods=['POST'])
-def relay_logout():
-    session.pop('authenticated', None)
-    return jsonify({'success': True})
+@app_relay.post("/api/logout")
+async def relay_logout():
+    response = JSONResponse(content={'success': True})
+    response.delete_cookie(key=AUTH_COOKIE_NAME)
+    return response
 
-@app_relay.route('/api/resolve', methods=['POST'])
-def relay_resolve():
-    if not session.get('authenticated'):
-        return jsonify({'success': False, 'error': 'Unauthorized. Passcode required.'}), 401
-        
-    data = request.get_json() or {}
+@app_relay.post("/api/resolve")
+async def relay_resolve(request: Request):
+    auth_cookie = request.cookies.get(AUTH_COOKIE_NAME)
+    if auth_cookie != AUTH_TOKEN_VALUE:
+        return JSONResponse(content={'success': False, 'error': 'Unauthorized. Passcode required.'}, status_code=401)
+
+    data = await request.json() or {}
     target_url = data.get('url', '').strip()
     if not target_url:
-        return jsonify({'success': False, 'error': 'URL target required'}), 400
+        return JSONResponse(content={'success': False, 'error': 'URL target required'}, status_code=400)
 
     try:
-        # Check if URL is already a direct downloadable/streamable media asset
         ext = target_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in target_url else ''
         if ext in ['mp4', 'mkv', 'webm', 'avi', 'mov', 'mp3', 'wav', 'png', 'jpg', 'jpeg', 'zip', 'pdf']:
             filename = target_url.split('/')[-1].split('?')[0] or 'media_asset'
             category = get_file_category('', filename)
-            return jsonify({
+            return {
                 'success': True,
                 'download_url': target_url,
                 'filename': filename,
                 'formatted_size': 'Direct Link',
                 'category': category
-            })
+            }
 
-        # Process shared resource URL link discreetly via backend resolver
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
-        
-        # Optional custom account cookie if provided in environment
         ndus_cookie = os.environ.get('RELAY_TOKEN', '')
         cookies = {'ndus': ndus_cookie} if ndus_cookie else {}
 
         resp = requests.get(target_url, headers=headers, cookies=cookies, timeout=12, allow_redirects=True)
         final_url = resp.url
-        
-        # If redirected to direct stream link
+
         filename = final_url.split('/')[-1].split('?')[0] or 'extracted_payload'
         mime = resp.headers.get('Content-Type', '')
         category = get_file_category(mime, filename)
-        
-        return jsonify({
+
+        return {
             'success': True,
             'download_url': final_url,
             'filename': filename,
             'formatted_size': format_bytes(int(resp.headers.get('Content-Length', 0))),
             'category': category
-        })
-
+        }
     except Exception as e:
-        return jsonify({'success': False, 'error': f'Failed to process link: {str(e)}'}), 500
+        return JSONResponse(content={'success': False, 'error': f'Failed to process link: {str(e)}'}, status_code=500)
 
 
 # ==============================================================================
-# UNIFIED DUAL-THREAD LAUNCHER
+# DUAL UVICORN ASGI LAUNCHER
 # ==============================================================================
-from werkzeug.serving import run_simple
-
 def run_main():
-    print("🚀 Port 8000: Storage Drive active on http://0.0.0.0:8000")
-    run_simple('0.0.0.0', 8000, app_main, threaded=True)
+    print("🚀 Port 8000: Storage Drive active on http://0.0.0.0:8000 (FastAPI ASGI)")
+    uvicorn.run(app_main, host="0.0.0.0", port=8000, log_level="warning")
 
 def run_relay():
-    print("🔐 Port 6969: Nexus Gate active on http://0.0.0.0:6969 (Passcode Required)")
-    run_simple('0.0.0.0', 6969, app_relay, threaded=True)
+    print("🔐 Port 6969: Nexus Gate active on http://0.0.0.0:6969 (FastAPI ASGI)")
+    uvicorn.run(app_relay, host="0.0.0.0", port=6969, log_level="warning")
 
-if __name__ == '__main__':
-    t1 = threading.Thread(target=run_main, daemon=True)
-    t2 = threading.Thread(target=run_relay, daemon=True)
-    
-    t1.start()
-    t2.start()
-    
+if __name__ == "__main__":
+    p1 = multiprocessing.Process(target=run_main)
+    p2 = multiprocessing.Process(target=run_relay)
+
+    p1.start()
+    p2.start()
+
     print("==================================================================")
-    print("  🌐 SERVER 1: http://localhost:8000 (File Manager & Storage Drive)")
-    print("  🔐 SERVER 2: http://localhost:6969 (Nexus Gate | Passcode: hiddenrarety)")
+    print("  🌐 SERVER 1: http://localhost:8000 (FastAPI Multi-Client Storage Drive)")
+    print("  🔐 SERVER 2: http://localhost:6969 (FastAPI Nexus Gate | Passcode: hiddenrarety)")
     print("==================================================================")
-    
-    t1.join()
-    t2.join()
 
-
+    p1.join()
+    p2.join()
