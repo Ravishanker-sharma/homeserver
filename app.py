@@ -54,11 +54,36 @@ def get_cache_info():
         'total_formatted': format_bytes(total_cache)
     }
 
+MEDIA_MIME_TYPES = {
+    'mp4': 'video/mp4',
+    'mkv': 'video/x-matroska',
+    'webm': 'video/webm',
+    'mov': 'video/quicktime',
+    'avi': 'video/x-msvideo',
+    'm4v': 'video/x-m4v',
+    'ts': 'video/mp2t',
+    'flv': 'video/x-flv',
+    'mp3': 'audio/mpeg',
+    'm4a': 'audio/mp4',
+    'aac': 'audio/aac',
+    'wav': 'audio/wav',
+    'ogg': 'audio/ogg',
+    'flac': 'audio/flac',
+    'opus': 'audio/opus'
+}
+
+def get_media_mimetype(filepath):
+    ext = filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
+    if ext in MEDIA_MIME_TYPES:
+        return MEDIA_MIME_TYPES[ext]
+    guessed, _ = mimetypes.guess_type(filepath)
+    return guessed or 'application/octet-stream'
+
 def get_file_category(mime_type, filename):
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
-    if (mime_type and mime_type.startswith('video/')) or ext in ['mp4', 'mkv', 'webm', 'avi', 'mov', 'flv', 'm4v']:
+    if (mime_type and mime_type.startswith('video/')) or ext in ['mp4', 'mkv', 'webm', 'avi', 'mov', 'flv', 'm4v', 'ts']:
         return 'video'
-    if (mime_type and mime_type.startswith('audio/')) or ext in ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac']:
+    if (mime_type and mime_type.startswith('audio/')) or ext in ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus']:
         return 'audio'
     if (mime_type and mime_type.startswith('image/')) or ext in ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp']:
         return 'image'
@@ -106,8 +131,6 @@ def api_cache_info():
 def api_cache_purge():
     try:
         cache_before = get_cache_info()['total_bytes']
-        
-        # Empty trash and chunks directories
         if os.path.exists(TRASH_FOLDER):
             shutil.rmtree(TRASH_FOLDER, ignore_errors=True)
             os.makedirs(TRASH_FOLDER, exist_ok=True)
@@ -130,7 +153,6 @@ def api_cache_purge():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
 @app_main.route('/api/files', methods=['GET'])
 def list_files():
     try:
@@ -140,8 +162,7 @@ def list_files():
             filepath = os.path.join(folder, filename)
             if os.path.isfile(filepath) and not filename.startswith('.'):
                 stat = os.stat(filepath)
-                mime_type, _ = mimetypes.guess_type(filepath)
-                mime_type = mime_type or 'application/octet-stream'
+                mime_type = get_media_mimetype(filepath)
                 category = get_file_category(mime_type, filename)
                 files.append({
                     'name': filename,
@@ -188,7 +209,6 @@ def upload_file():
 
 @app_main.route('/api/upload/chunk', methods=['POST'])
 def upload_chunk():
-    """Handles chunked file uploads for high-speed, reliable large file transfers."""
     try:
         file_chunk = request.files.get('chunk')
         upload_id = secure_filename(request.form.get('upload_id', ''))
@@ -205,10 +225,8 @@ def upload_chunk():
         chunk_filepath = os.path.join(chunk_dir, f"chunk_{chunk_index:05d}")
         file_chunk.save(chunk_filepath)
 
-        # Check if all chunks have been received
         received_chunks = len([f for f in os.listdir(chunk_dir) if f.startswith('chunk_')])
         if received_chunks == total_chunks:
-            # Merge chunks into final destination file
             destination = os.path.join(app_main.config['UPLOAD_FOLDER'], filename)
             if os.path.exists(destination):
                 base, ext = os.path.splitext(filename)
@@ -223,7 +241,6 @@ def upload_chunk():
                         with open(c_path, 'rb') as c_file:
                             shutil.copyfileobj(c_file, final_file)
 
-            # Cleanup temporary chunk folder
             shutil.rmtree(chunk_dir, ignore_errors=True)
 
             return jsonify({
@@ -242,7 +259,6 @@ def upload_chunk():
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 @app_main.route('/api/files/<path:filename>', methods=['DELETE'])
 def delete_file(filename):
@@ -263,54 +279,26 @@ def delete_file(filename):
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
 @app_main.route('/files/<path:filename>')
 def serve_file(filename):
+    """Serves media files with Werkzeug native conditional Byte-Range support for smooth streaming & audio."""
     safe_name = secure_filename(filename)
     filepath = os.path.join(app_main.config['UPLOAD_FOLDER'], safe_name)
     if not os.path.isfile(filepath):
         abort(404)
-        
-    file_size = os.path.getsize(filepath)
-    range_header = request.headers.get('Range', None)
-    
-    if range_header:
-        byte1, byte2 = 0, None
-        match = re.search(r'bytes=(\d+)-(\d+)?', range_header)
-        if match:
-            groups = match.groups()
-            byte1 = int(groups[0])
-            if groups[1]:
-                byte2 = int(groups[1])
-                
-        chunk_size = 1024 * 1024 * 2
-        if byte2 is None:
-            byte2 = min(byte1 + chunk_size - 1, file_size - 1)
-            
-        length = byte2 - byte1 + 1
-        
-        def generate():
-            with open(filepath, 'rb') as f:
-                f.seek(byte1)
-                remaining = length
-                while remaining > 0:
-                    read_bytes = min(1024 * 64, remaining)
-                    chunk = f.read(read_bytes)
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
-                    
-        mime_type, _ = mimetypes.guess_type(filepath)
-        mime_type = mime_type or 'application/octet-stream'
-        
-        response = Response(generate(), 206, mimetype=mime_type, content_type=mime_type, direct_passthrough=True)
-        response.headers.add('Content-Range', f'bytes {byte1}-{byte2}/{file_size}')
-        response.headers.add('Accept-Ranges', 'bytes')
-        response.headers.add('Content-Length', str(length))
-        return response
 
-    return send_from_directory(app_main.config['UPLOAD_FOLDER'], safe_name)
+    mimetype = get_media_mimetype(filepath)
+
+    response = send_from_directory(
+        app_main.config['UPLOAD_FOLDER'],
+        safe_name,
+        conditional=True,
+        mimetype=mimetype
+    )
+    response.headers['Accept-Ranges'] = 'bytes'
+    response.headers['Cache-Control'] = 'public, max-age=3600'
+    return response
+
 
 @app_main.route('/download/<path:filename>')
 def download_file(filename):

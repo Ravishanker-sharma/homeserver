@@ -426,14 +426,54 @@ document.addEventListener('DOMContentLoaded', () => {
         videoTitle.textContent = fileName;
         videoInfo.textContent = fileObj ? fileObj.formatted_size : '';
         videoDownload.href = `/download/${encodeURIComponent(fileName)}`;
-        videoPlayer.src = `/files/${encodeURIComponent(fileName)}`;
+        
+        const streamUrl = `${window.location.origin}/files/${encodeURIComponent(fileName)}`;
+        videoPlayer.src = streamUrl;
+        videoPlayer.playbackRate = 1.0;
+        
+        // Reset active speed button
+        document.querySelectorAll('.btn-speed').forEach(b => {
+            b.classList.toggle('active', b.dataset.speed === '1.0');
+        });
+
+        // External Player Button
+        const btnExternal = document.getElementById('btn-open-external');
+        if (btnExternal) {
+            btnExternal.onclick = () => {
+                // Launch VLC app protocol or copy direct stream URL
+                window.location.href = `vlc://${streamUrl}`;
+                setTimeout(() => {
+                    navigator.clipboard.writeText(streamUrl);
+                    showToast('Direct stream link copied for external player!', 'success');
+                }, 1000);
+            };
+        }
+
+        // Error fallback for unsupported codecs
+        videoPlayer.onerror = () => {
+            showToast('Codec error: Click "Open in VLC" for external playback', 'error');
+        };
+
         videoModal.style.display = 'flex';
         videoPlayer.play().catch(e => console.log('Autoplay:', e));
     }
 
     function closeVideoModal() {
-        videoPlayer.pause(); videoPlayer.src = ''; videoModal.style.display = 'none';
+        videoPlayer.pause(); 
+        videoPlayer.src = ''; 
+        videoModal.style.display = 'none';
     }
+
+    // Attach speed selector button listeners
+    document.querySelectorAll('.btn-speed').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.btn-speed').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const speed = parseFloat(btn.dataset.speed);
+            if (videoPlayer) videoPlayer.playbackRate = speed;
+        });
+    });
+
 
     function openAudioModal(fileName) {
         audioTitle.textContent = fileName;
