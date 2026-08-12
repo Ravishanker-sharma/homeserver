@@ -60,7 +60,14 @@
                         <p id="storage-status-sub">Calculating drive capacity...</p>
                     </div>
                 </div>
-                <div class="storage-percent-badge" id="storage-percent">0%</div>
+                
+                <div class="storage-header-actions">
+                    <button class="btn-secondary btn-purge" id="btn-clean-cache" title="Empty Trash Bin & Temp Upload Chunks">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                        Clean Cache & Trash
+                    </button>
+                    <div class="storage-percent-badge" id="storage-percent">0%</div>
+                </div>
             </div>
 
             <!-- Progress Meter -->
@@ -79,11 +86,16 @@
                     <span class="stat-value highlight" id="stat-free">-- GB</span>
                 </div>
                 <div class="stat-box">
+                    <span class="stat-label">Trash & Cache</span>
+                    <span class="stat-value highlight-pink" id="stat-cache">0 B</span>
+                </div>
+                <div class="stat-box">
                     <span class="stat-label">Total Capacity</span>
                     <span class="stat-value" id="stat-total">-- GB</span>
                 </div>
             </div>
         </section>
+
 
         <!-- UPLOAD SECTION -->
         <section class="upload-section">

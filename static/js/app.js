@@ -35,8 +35,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const storagePercent = document.getElementById('storage-percent');
     const statUsed = document.getElementById('stat-used');
     const statFree = document.getElementById('stat-free');
+    const statCache = document.getElementById('stat-cache');
     const statTotal = document.getElementById('stat-total');
     const storageSub = document.getElementById('storage-status-sub');
+    const btnCleanCache = document.getElementById('btn-clean-cache');
+
     
     // Modals
     const videoModal = document.getElementById('video-modal');
@@ -101,6 +104,7 @@ document.addEventListener('DOMContentLoaded', () => {
         storagePercent.textContent = `${storage.percent_used}%`;
         statUsed.textContent = storage.used_formatted;
         statFree.textContent = storage.free_formatted;
+        if (statCache && storage.cache) statCache.textContent = storage.cache.total_formatted;
         statTotal.textContent = storage.total_formatted;
         storageSub.textContent = `${storage.free_formatted} available space out of ${storage.total_formatted}`;
         
@@ -110,6 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
             storageBar.style.background = 'linear-gradient(90deg, var(--primary), var(--secondary))';
         }
     }
+
 
     function renderFiles() {
         const filtered = state.files.filter(file => {
@@ -233,7 +238,28 @@ document.addEventListener('DOMContentLoaded', () => {
             uploadQueue.style.display = 'none';
         });
 
+        if (btnCleanCache) {
+            btnCleanCache.addEventListener('click', async () => {
+                if (confirm('Empty trash bin and clear temporary upload cache?')) {
+                    try {
+                        const res = await fetch('/api/cache/purge', { method: 'POST' });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast(`Reclaimed ${data.reclaimed_formatted} storage!`, 'success');
+                            loadStorageInfo();
+                            loadFilesList();
+                        } else {
+                            showToast(data.error || 'Purge failed', 'error');
+                        }
+                    } catch (err) {
+                        showToast('Error cleaning cache', 'error');
+                    }
+                }
+            });
+        }
+
         // Drag & Drop
+
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             dropZone.addEventListener(eventName, preventDefaults, false);
         });

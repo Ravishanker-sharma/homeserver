@@ -14,10 +14,15 @@ from werkzeug.utils import secure_filename
 # ==============================================================================
 app_main = Flask(__name__, template_folder='templates', static_folder='static')
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
+TRASH_FOLDER = os.path.join(UPLOAD_FOLDER, '.trash')
+CHUNKS_FOLDER = os.path.join(UPLOAD_FOLDER, '.chunks')
+
 app_main.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app_main.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max upload limit
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(TRASH_FOLDER, exist_ok=True)
+os.makedirs(CHUNKS_FOLDER, exist_ok=True)
 
 def format_bytes(size):
     if size == 0:
@@ -27,6 +32,27 @@ def format_bytes(size):
     p = math.pow(1024, i)
     s = round(size / p, 2)
     return f"{s} {size_name[i]}"
+
+def get_dir_size(path):
+    total = 0
+    if os.path.exists(path):
+        for root, dirs, files in os.walk(path):
+            for f in files:
+                fp = os.path.join(root, f)
+                if os.path.isfile(fp):
+                    total += os.path.getsize(fp)
+    return total
+
+def get_cache_info():
+    trash_bytes = get_dir_size(TRASH_FOLDER)
+    chunks_bytes = get_dir_size(CHUNKS_FOLDER)
+    total_cache = trash_bytes + chunks_bytes
+    return {
+        'trash_bytes': trash_bytes,
+        'chunks_bytes': chunks_bytes,
+        'total_bytes': total_cache,
+        'total_formatted': format_bytes(total_cache)
+    }
 
 def get_file_category(mime_type, filename):
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
@@ -46,6 +72,7 @@ def get_storage_info():
     path = app_main.config['UPLOAD_FOLDER']
     total, used, free = shutil.disk_usage(path)
     percent_used = round((used / total) * 100, 1)
+    cache = get_cache_info()
     return {
         'total': total,
         'used': used,
@@ -53,7 +80,8 @@ def get_storage_info():
         'percent_used': percent_used,
         'total_formatted': format_bytes(total),
         'used_formatted': format_bytes(used),
-        'free_formatted': format_bytes(free)
+        'free_formatted': format_bytes(free),
+        'cache': cache
     }
 
 @app_main.route('/')
@@ -66,6 +94,42 @@ def api_storage():
         return jsonify({'success': True, 'storage': get_storage_info()})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app_main.route('/api/cache/info', methods=['GET'])
+def api_cache_info():
+    try:
+        return jsonify({'success': True, 'cache': get_cache_info()})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app_main.route('/api/cache/purge', methods=['POST'])
+def api_cache_purge():
+    try:
+        cache_before = get_cache_info()['total_bytes']
+        
+        # Empty trash and chunks directories
+        if os.path.exists(TRASH_FOLDER):
+            shutil.rmtree(TRASH_FOLDER, ignore_errors=True)
+            os.makedirs(TRASH_FOLDER, exist_ok=True)
+            
+        if os.path.exists(CHUNKS_FOLDER):
+            shutil.rmtree(CHUNKS_FOLDER, ignore_errors=True)
+            os.makedirs(CHUNKS_FOLDER, exist_ok=True)
+            
+        reclaimed_bytes = cache_before
+        reclaimed_formatted = format_bytes(reclaimed_bytes)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Successfully reclaimed {reclaimed_formatted} storage',
+            'reclaimed_bytes': reclaimed_bytes,
+            'reclaimed_formatted': reclaimed_formatted,
+            'storage': get_storage_info(),
+            'cache': get_cache_info()
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app_main.route('/api/files', methods=['GET'])
 def list_files():
@@ -187,10 +251,18 @@ def delete_file(filename):
         filepath = os.path.join(app_main.config['UPLOAD_FOLDER'], safe_name)
         if not os.path.exists(filepath):
             return jsonify({'success': False, 'error': 'File not found'}), 404
-        os.remove(filepath)
-        return jsonify({'success': True, 'message': f'File {safe_name} deleted successfully'})
+            
+        trash_destination = os.path.join(TRASH_FOLDER, safe_name)
+        if os.path.exists(trash_destination):
+            base, ext = os.path.splitext(safe_name)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            trash_destination = os.path.join(TRASH_FOLDER, f"{base}_{timestamp}{ext}")
+            
+        shutil.move(filepath, trash_destination)
+        return jsonify({'success': True, 'message': f'File {safe_name} moved to trash'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app_main.route('/files/<path:filename>')
 def serve_file(filename):

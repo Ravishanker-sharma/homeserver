@@ -289,9 +289,28 @@ body {
     color: var(--text-main);
 }
 
-.stat-value.highlight {
-    color: var(--accent-emerald);
+.storage-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
 }
+
+.btn-purge {
+    background: rgba(236, 72, 153, 0.15);
+    color: var(--accent-pink);
+    border-color: rgba(236, 72, 153, 0.3);
+}
+
+.btn-purge:hover {
+    background: rgba(236, 72, 153, 0.3);
+    color: #FFF;
+    box-shadow: 0 0 16px rgba(236, 72, 153, 0.4);
+}
+
+.stat-value.highlight-pink {
+    color: var(--accent-pink);
+}
+
 
 /* UPLOAD SECTION */
 .upload-section {
