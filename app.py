@@ -152,6 +152,7 @@ if USE_FASTAPI:
 
     @app_main.post("/api/cache/purge")
     async def api_cache_purge():
+
         cache_before = get_cache_info()['total_bytes']
         if os.path.exists(TRASH_FOLDER):
             shutil.rmtree(TRASH_FOLDER, ignore_errors=True)
@@ -170,7 +171,12 @@ if USE_FASTAPI:
             'cache': get_cache_info()
         }
 
+    @app_main.get("/api/ffmpeg/check")
+    async def api_ffmpeg_check():
+        return {"success": True, "installed": check_ffmpeg_installed()}
+
     @app_main.get("/api/files")
+
     async def list_files():
         files = []
         for filename in os.listdir(UPLOAD_FOLDER):
@@ -454,7 +460,12 @@ else:
         shutil.rmtree(CHUNKS_FOLDER, ignore_errors=True); os.makedirs(CHUNKS_FOLDER, exist_ok=True)
         return jsonify({'success': True, 'message': f'Reclaimed {format_bytes(cache_before)}', 'storage': get_storage_info(), 'cache': get_cache_info()})
 
+    @app_main_flask.route('/api/ffmpeg/check')
+    def flask_api_ffmpeg_check():
+        return jsonify({"success": True, "installed": check_ffmpeg_installed()})
+
     @app_main_flask.route('/api/files')
+
     def flask_list_files():
         files = []
         for filename in os.listdir(UPLOAD_FOLDER):

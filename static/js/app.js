@@ -425,7 +425,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const fileObj = state.files.find(f => f.name === fileName);
         videoTitle.textContent = fileName;
         videoInfo.textContent = fileObj ? fileObj.formatted_size : '';
+        const videoDownload = document.getElementById('video-modal-download');
         videoDownload.href = `/download/${encodeURIComponent(fileName)}`;
+
         
         const streamUrl = `${window.location.origin}/files/${encodeURIComponent(fileName)}`;
         const transcodeUrl = `${window.location.origin}/transcode/${encodeURIComponent(fileName)}`;
@@ -438,15 +440,39 @@ document.addEventListener('DOMContentLoaded', () => {
             b.classList.toggle('active', b.dataset.speed === '1.0');
         });
 
+        // Show warning for MKV files on Safari/iOS
+        if (fileName.toLowerCase().endsWith('.mkv')) {
+            const isIOS = /iphone|ipad|ipod|macintosh/i.test(navigator.userAgent || '');
+            if (isIOS) {
+                setTimeout(() => {
+                    showToast('Safari does not support MKV! Click "Fix Sound" to convert it, or use VLC.', 'error');
+                }, 1500);
+            }
+        }
+
+
         // Audio Fix Transcode Button
         const btnTranscode = document.getElementById('btn-transcode-audio');
         if (btnTranscode) {
-            btnTranscode.onclick = () => {
-                showToast('Switching to AAC Audio Transcode Mode...', 'success');
-                videoPlayer.src = transcodeUrl;
-                videoPlayer.play().catch(e => console.log('Autoplay:', e));
+            btnTranscode.onclick = async () => {
+                try {
+                    const res = await fetch('/api/ffmpeg/check');
+                    const data = await res.json();
+                    if (data.installed) {
+                        showToast('Switching to AAC Audio Transcode Mode...', 'success');
+                        videoPlayer.src = transcodeUrl;
+                        videoPlayer.play().catch(e => console.log('Autoplay:', e));
+                    } else {
+                        showToast('FFmpeg is not installed on your server! Please run "pkg install ffmpeg" in Termux.', 'error');
+                    }
+                } catch (e) {
+                    showToast('Failed to verify FFmpeg status. Playback may fail.', 'error');
+                    videoPlayer.src = transcodeUrl;
+                    videoPlayer.play().catch(e => console.log('Autoplay:', e));
+                }
             };
         }
+
 
         // External Player Button (VLC / MX Player Universal Launcher)
         const btnExternal = document.getElementById('btn-open-external');
