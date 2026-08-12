@@ -475,6 +475,67 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
 
+        // Permanent Convert Button
+        const btnPermanentConvert = document.getElementById('btn-permanent-convert');
+        if (btnPermanentConvert) {
+            btnPermanentConvert.onclick = async () => {
+                const res = await fetch('/api/ffmpeg/check');
+                const data = await res.json();
+                if (!data.installed) {
+                    showToast('FFmpeg is not installed! Run "pkg install ffmpeg" in Termux.', 'error');
+                    return;
+                }
+                
+                try {
+                    const startRes = await fetch('/api/convert/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filename: fileName })
+                    });
+                    const startData = await startRes.json();
+                    if (startData.success) {
+                        showToast('Started background conversion to MP4...', 'success');
+                        const progressContainer = document.getElementById('conversion-progress-container');
+                        const progressBar = document.getElementById('conversion-progress-bar');
+                        progressContainer.style.display = 'block';
+                        btnPermanentConvert.disabled = true;
+                        
+                        const pollStatus = setInterval(async () => {
+                            const statusRes = await fetch(`/api/convert/status/${startData.task_id}`);
+                            const statusData = await statusRes.json();
+                            
+                            if (statusData.status === 'completed') {
+                                clearInterval(pollStatus);
+                                progressContainer.style.display = 'none';
+                                showToast('Conversion Complete! Playing natively...', 'success');
+                                btnPermanentConvert.disabled = false;
+                                
+                                // Reload with new file
+                                fetchFiles();
+                                setTimeout(() => openVideoModal(startData.out_name), 1000);
+                            } else if (statusData.status === 'error') {
+                                clearInterval(pollStatus);
+                                progressContainer.style.display = 'none';
+                                btnPermanentConvert.disabled = false;
+                                showToast('Conversion failed: ' + statusData.error, 'error');
+                            } else {
+                                // Just a simulated progress bar for UI since ffmpeg stdout parsing is complex
+                                let currentWidth = parseFloat(progressBar.style.width) || 0;
+                                if (currentWidth < 95) {
+                                    progressBar.style.width = (currentWidth + 2) + '%';
+                                }
+                            }
+                        }, 2000);
+                        
+                    } else {
+                        showToast(startData.error || 'Failed to start conversion', 'error');
+                    }
+                } catch (e) {
+                    showToast('Error communicating with server', 'error');
+                }
+            };
+        }
+
         // External Player Button (VLC / MX Player Universal Launcher)
         const btnExternal = document.getElementById('btn-open-external');
         if (btnExternal) {

@@ -32,17 +32,44 @@ MEDIA_MIME_TYPES = {
     'opus': 'audio/opus'
 }
 
+# State cache variables
+STORAGE_CACHE = {'timestamp': 0, 'data': None}
+CACHE_DIR_SIZE = {'timestamp': 0, 'data': None}
+AUTH_TOKEN_VALUE = "hiddenrarety"
+AUTH_COOKIE_NAME = "nexus_gate_auth"
+
+# Conversion tracking
+conversion_tasks = {}
+
 def format_bytes(size: int) -> str:
-    if size == 0:
-        return "0 B"
-    size_name = ("B", "KB", "MB", "GB", "TB")
-    i = int(math.floor(math.log(size, 1024)))
-    p = math.pow(1024, i)
-    s = round(size / p, 2)
-    return f"{s} {size_name[i]}"
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024.0: return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} PB"
 
 def check_ffmpeg_installed() -> bool:
     return shutil.which('ffmpeg') is not None
+
+def run_background_conversion(task_id, filepath, out_filepath):
+    conversion_tasks[task_id] = {'status': 'converting', 'progress': 0}
+    try:
+        cmd = [
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', filepath,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-movflags', '+faststart',
+            out_filepath
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode == 0:
+            conversion_tasks[task_id] = {'status': 'completed', 'file': out_filepath}
+            # Optionally remove original file? No, keep it safe
+        else:
+            conversion_tasks[task_id] = {'status': 'error', 'error': proc.stderr}
+    except Exception as e:
+        conversion_tasks[task_id] = {'status': 'error', 'error': str(e)}
 
 def get_media_mimetype(filepath: str) -> str:
     ext = filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
@@ -174,6 +201,31 @@ if USE_FASTAPI:
     @app_main.get("/api/ffmpeg/check")
     async def api_ffmpeg_check():
         return {"success": True, "installed": check_ffmpeg_installed()}
+
+    @app_main.post("/api/convert/start")
+    async def api_convert_start(request: Request):
+        if not check_ffmpeg_installed():
+            return JSONResponse(content={'success': False, 'error': 'FFmpeg not installed'}, status_code=500)
+        data = await request.json()
+        filename = data.get('filename', '').strip()
+        safe_name = secure_filename(filename)
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        if not os.path.exists(filepath):
+            return JSONResponse(content={'success': False, 'error': 'File not found'}, status_code=404)
+        
+        task_id = f"task_{int(time.time())}_{safe_name}"
+        out_name = f"[Fixed] {safe_name.rsplit('.', 1)[0]}.mp4"
+        out_filepath = os.path.join(UPLOAD_FOLDER, out_name)
+        
+        threading.Thread(target=run_background_conversion, args=(task_id, filepath, out_filepath), daemon=True).start()
+        return {'success': True, 'task_id': task_id, 'out_name': out_name}
+
+    @app_main.get("/api/convert/status/{task_id}")
+    async def api_convert_status(task_id: str):
+        task = conversion_tasks.get(task_id)
+        if not task:
+            return JSONResponse(content={'success': False, 'error': 'Task not found'}, status_code=404)
+        return {'success': True, 'status': task['status'], 'error': task.get('error', '')}
 
     @app_main.get("/api/files")
 
@@ -467,6 +519,30 @@ else:
     @app_main_flask.route('/api/ffmpeg/check')
     def flask_api_ffmpeg_check():
         return jsonify({"success": True, "installed": check_ffmpeg_installed()})
+
+    @app_main_flask.route('/api/convert/start', methods=['POST'])
+    def flask_api_convert_start():
+        if not check_ffmpeg_installed():
+            return jsonify({'success': False, 'error': 'FFmpeg not installed'}), 500
+        filename = request.json.get('filename', '').strip()
+        safe_name = secure_filename(filename)
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        if not os.path.exists(filepath):
+            return jsonify({'success': False, 'error': 'File not found'}), 404
+        
+        task_id = f"task_{int(time.time())}_{safe_name}"
+        out_name = f"[Fixed] {safe_name.rsplit('.', 1)[0]}.mp4"
+        out_filepath = os.path.join(UPLOAD_FOLDER, out_name)
+        
+        threading.Thread(target=run_background_conversion, args=(task_id, filepath, out_filepath), daemon=True).start()
+        return jsonify({'success': True, 'task_id': task_id, 'out_name': out_name})
+
+    @app_main_flask.route('/api/convert/status/<task_id>')
+    def flask_api_convert_status(task_id):
+        task = conversion_tasks.get(task_id)
+        if not task:
+            return jsonify({'success': False, 'error': 'Task not found'}), 404
+        return jsonify({'success': True, 'status': task['status'], 'error': task.get('error', '')})
 
     @app_main_flask.route('/api/files')
 
