@@ -7,6 +7,7 @@ import threading
 import multiprocessing
 import time
 import subprocess
+import urllib.parse
 from datetime import datetime
 from typing import List, Optional
 
@@ -169,6 +170,15 @@ if USE_FASTAPI:
 
     @app_main.get("/", response_class=HTMLResponse)
     async def main_index(request: Request):
+        user_agent = request.headers.get('user-agent', '')
+        if 'vlc' in user_agent.lower():
+            lines = ["#EXTM3U"]
+            for f in os.listdir(UPLOAD_FOLDER):
+                if os.path.isfile(os.path.join(UPLOAD_FOLDER, f)) and not f.startswith('.'):
+                    url = f"{request.url.scheme}://{request.url.netloc}/files/{urllib.parse.quote(f)}"
+                    lines.append(f"#EXTINF:-1,{f}")
+                    lines.append(url)
+            return Response(content='\n'.join(lines), media_type="application/vnd.apple.mpegurl")
         return templates_main.TemplateResponse("index.html", {"request": request})
 
     @app_main.get("/api/storage")
@@ -501,6 +511,16 @@ else:
 
     @app_main_flask.route('/')
     def flask_main_index():
+        user_agent = request.headers.get('User-Agent', '')
+        if 'vlc' in user_agent.lower():
+            from flask import Response as FlaskResponse
+            lines = ["#EXTM3U"]
+            for f in os.listdir(UPLOAD_FOLDER):
+                if os.path.isfile(os.path.join(UPLOAD_FOLDER, f)) and not f.startswith('.'):
+                    url = f"{request.scheme}://{request.host}/files/{urllib.parse.quote(f)}"
+                    lines.append(f"#EXTINF:-1,{f}")
+                    lines.append(url)
+            return FlaskResponse('\n'.join(lines), mimetype="application/vnd.apple.mpegurl")
         return render_template('index.html')
 
     @app_main_flask.route('/api/storage')
