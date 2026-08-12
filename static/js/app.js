@@ -448,17 +448,38 @@ document.addEventListener('DOMContentLoaded', () => {
             };
         }
 
-        // External Player Button
+        // External Player Button (VLC / MX Player Universal Launcher)
         const btnExternal = document.getElementById('btn-open-external');
         if (btnExternal) {
             btnExternal.onclick = () => {
-                window.location.href = `vlc://${streamUrl}`;
+                const ua = navigator.userAgent || '';
+                const isAndroid = /android/i.test(ua);
+                const isIOS = /iphone|ipad|ipod/i.test(ua);
+                const rawHost = window.location.host;
+                const encodedFile = encodeURIComponent(fileName);
+                const streamUrl = `${window.location.origin}/files/${encodedFile}`;
+                const m3uUrl = `${window.location.origin}/m3u/${encodedFile}`;
+
+                if (isAndroid) {
+                    // Launch Android VLC Intent
+                    const intentUrl = `intent://${rawHost}/files/${encodedFile}#Intent;scheme=http;type=video/*;package=org.videolan.vlc;end`;
+                    window.location.href = intentUrl;
+                } else if (isIOS) {
+                    // Launch iOS VLC Scheme
+                    window.location.href = `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(streamUrl)}`;
+                } else {
+                    // Trigger .m3u stream playlist download for VLC on Desktop
+                    window.location.href = m3uUrl;
+                }
+
+                // Clipboard fallback for manual network stream pasting
                 setTimeout(() => {
                     navigator.clipboard.writeText(streamUrl);
-                    showToast('Direct stream link copied for external player!', 'success');
-                }, 1000);
+                    showToast('Opening in VLC & stream link copied to clipboard!', 'success');
+                }, 600);
             };
         }
+
 
         // Error fallback for unsupported codecs
         videoPlayer.onerror = () => {

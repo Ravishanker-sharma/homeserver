@@ -118,12 +118,13 @@ AUTH_TOKEN_VALUE = 'nexus_authorized_6969'
 # Check if FastAPI + Uvicorn is installed, otherwise fallback to Flask
 try:
     from fastapi import FastAPI, Request, Form, File, UploadFile, HTTPException
-    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse, Response, RedirectResponse
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
     import uvicorn
     USE_FASTAPI = True
 except ImportError:
+
     from flask import Flask, render_template, request, jsonify, send_from_directory, Response, abort, session
     from werkzeug.serving import run_simple
     USE_FASTAPI = False
@@ -358,6 +359,25 @@ if USE_FASTAPI:
             raise HTTPException(status_code=404, detail="File not found")
         return FileResponse(filepath, filename=safe_name)
 
+    @app_main.get("/m3u/{filename}")
+    async def serve_m3u(filename: str, request: Request):
+        """Generates .m3u stream playlist for instant playback in VLC / MX Player."""
+        safe_name = secure_filename(filename)
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        if not os.path.isfile(filepath):
+            raise HTTPException(status_code=404, detail="File not found")
+
+        host_url = str(request.base_url).rstrip('/')
+        stream_url = f"{host_url}/files/{safe_name}"
+
+        m3u_content = f"#EXTM3U\n#EXTINF:-1,{safe_name}\n{stream_url}\n"
+        headers = {
+            'Content-Type': 'audio/x-mpegurl',
+            'Content-Disposition': f'attachment; filename="{safe_name}.m3u"'
+        }
+        return Response(content=m3u_content, headers=headers)
+
+
     # Relay Server 2
     app_relay = FastAPI(title="Nexus Gate Relay", version="2.0.0")
     templates_relay = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -534,6 +554,22 @@ else:
     @app_main_flask.route('/download/<path:filename>')
     def flask_download_file(filename):
         return send_from_directory(UPLOAD_FOLDER, secure_filename(filename), as_attachment=True)
+
+    @app_main_flask.route('/m3u/<path:filename>')
+    def flask_serve_m3u(filename):
+        safe_name = secure_filename(filename)
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        if not os.path.isfile(filepath):
+            abort(404)
+
+        host_url = request.host_url.rstrip('/')
+        stream_url = f"{host_url}/files/{safe_name}"
+
+        m3u_content = f"#EXTM3U\n#EXTINF:-1,{safe_name}\n{stream_url}\n"
+        response = Response(m3u_content, mimetype='audio/x-mpegurl')
+        response.headers['Content-Disposition'] = f'attachment; filename="{safe_name}.m3u"'
+        return response
+
 
     app_relay_flask = Flask(__name__, template_folder='templates', static_folder='static')
     app_relay_flask.secret_key = 'nexus-secret-6969'
